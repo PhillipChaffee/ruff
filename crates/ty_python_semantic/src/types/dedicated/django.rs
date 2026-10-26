@@ -7,6 +7,7 @@ use ty_python_core::{
 };
 
 use crate::place::{known_module_symbol, place_from_bindings};
+use crate::types::call::Binding;
 use crate::types::infer::nearest_enclosing_class;
 use crate::types::member::class_member;
 use crate::types::{
@@ -289,7 +290,7 @@ fn primary_key_member<'db>(
         }
         if let Some(field) = own_primary_key(db, base) {
             return (name == "pk").then(|| {
-                foreign_key_id_type(db, env, field, specialization)
+                foreign_key_id_type(db, env, base, field, specialization)
                     .unwrap_or_else(|| field.ty.apply_optional_specialization(db, specialization))
             });
         }
@@ -316,6 +317,23 @@ fn own_primary_key<'db>(
         .find(|field| field.metadata.primary_key)
 }
 
+/// django-stubs annotates `ForeignKey.__init__`'s `to` parameter as `type[Model] | str`.
+/// Use the supplied model class to fill missing read and write types on the descriptor.
+pub(in crate::types) fn foreign_key_model_type<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+    binding: &Binding<'db>,
+) -> Option<Type<'db>> {
+    let to = binding.parameter_type_by_name(db, "to", false).ok()??;
+    let model = to.to_instance_approximation(db, env)?;
+    let null = binding.parameter_type_by_name(db, "null", false).ok()?;
+    Some(if null == Some(Type::bool_literal(true)) {
+        UnionType::from_two_elements(db, env, model, Type::none(db, env))
+    } else {
+        model
+    })
+}
+
 /// Synthesize `<field>_id` attributes for foreign keys using the referenced field's type.
 ///
 /// For example, `Book().author_id` has type `int`, matching `Author`'s automatic primary key:
@@ -337,13 +355,14 @@ fn foreign_key_id_member<'db>(
     let field = own_model_fields(db, class)
         .iter()
         .find(|field| field.name == field_name)?;
-    foreign_key_id_type(db, env, field, specialization)
+    foreign_key_id_type(db, env, class, field, specialization)
 }
 
 /// Return a relation field's stored ID type, used by both `<field>_id` and `pk`.
 fn foreign_key_id_type<'db>(
     db: &'db dyn Db,
     env: &ProgramEnvironment<'db>,
+    class: StaticClassLiteral<'db>,
     field: &Field<'db>,
     specialization: Option<Specialization<'db>>,
 ) -> Option<Type<'db>> {
@@ -356,16 +375,17 @@ fn foreign_key_id_type<'db>(
         return None;
     }
 
-    // django-types represents a foreign key declared with `null=True` as
-    // `ForeignKey[Author | None]`, so its `related_model` attribute has type
-    // `type[Author | None]`. Remove `None` from the instance type before looking up `pk`
-    // (or `to_field`) on `Author`. If `null=True`, add `None` to the
-    // resulting ID type: for example, an integer primary key becomes `int | None`.
+    // The descriptor returns the related model instance. For a nullable foreign key,
+    // look up the target field on the model and add `None` to the resulting ID type.
+    let instance = Type::instance(
+        db,
+        env,
+        class.apply_optional_specialization(db, specialization),
+    );
     let related_model = field_ty
-        .member(db, env, "related_model")
-        .place
-        .ignore_possibly_undefined()?
-        .to_instance_approximation(db, env)?
+        .try_call_dunder_get(db, env, Some(instance), instance.to_meta_type(db, env))
+        .ok()??
+        .return_type
         .filter_union(db, env, |ty| !ty.is_none(db));
     let target_name = field.metadata.to_field.as_deref().unwrap_or("pk");
     let id_ty = related_model
