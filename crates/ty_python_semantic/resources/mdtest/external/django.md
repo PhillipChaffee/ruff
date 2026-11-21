@@ -799,8 +799,8 @@ reveal_type(Article.reviewed.published())  # revealed: Unknown
 ```
 
 The manager only has the public methods that the custom `QuerySet` class adds. Django does not copy
-private methods, other attributes, or the methods of `QuerySet` that only make sense on a `QuerySet`,
-such as `delete()`:
+private methods, other attributes, or the methods of `QuerySet` that only make sense on a
+`QuerySet`, such as `delete()`:
 
 ```py
 class BookQuerySet(models.QuerySet["Book"]):
