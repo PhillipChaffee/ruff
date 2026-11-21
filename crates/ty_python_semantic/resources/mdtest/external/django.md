@@ -889,7 +889,7 @@ from django.contrib.auth.models import AbstractUser
 from django.http import HttpRequest
 
 User = get_user_model()
-reveal_type(User)  # revealed: type[AbstractUser]
+reveal_type(User)  # revealed: <class 'AbstractUser'>
 reveal_type(User.objects.create_user("alice"))  # revealed: AbstractUser
 
 def _(user: AbstractUser):
@@ -904,14 +904,11 @@ def _(request: HttpRequest):
         reveal_type(request.user)  # revealed: AbstractUser
 ```
 
-The result of `get_user_model()` is a variable, so it cannot be used as a type:
+The result of `get_user_model()` can be used as a type:
 
 ```py
-# TODO: Should not be an error.
-# error: [invalid-type-form]
 def _(user: User):
-    # TODO: Should be `AbstractUser`.
-    reveal_type(user)  # revealed: Unknown
+    reveal_type(user)  # revealed: AbstractUser
 ```
 
 ## Primary key of an abstract model's subclasses
