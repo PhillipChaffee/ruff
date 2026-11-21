@@ -696,33 +696,39 @@ def _(author: Author):
 ## User model
 
 `get_user_model()` returns the model named by the `AUTH_USER_MODEL` setting, which is
-`django.contrib.auth.models.User` by default. django-stubs declares the return type as
-`type[AbstractBaseUser]`, so the result cannot be used as a type, and the attributes that `User`
-adds are missing:
+`django.contrib.auth.models.User` by default. django-stubs declares the user model as
+`AbstractBaseUser`, a placeholder that a type checker is expected to refine. We do not read
+settings, so we use `AbstractUser`, the base class of `User` and of most custom user models:
 
 ```py
 from django.contrib.auth import get_user_model
+from django.contrib.auth.models import AbstractUser
 from django.http import HttpRequest
 
 User = get_user_model()
+reveal_type(User)  # revealed: type[AbstractUser]
+reveal_type(User.objects.create_user("alice"))  # revealed: AbstractUser
 
+def _(user: AbstractUser):
+    reveal_type(user.username)  # revealed: str
+    reveal_type(user.is_superuser)  # revealed: bool
+
+def _(request: HttpRequest):
+    reveal_type(request.user)  # revealed: AbstractUser | AnonymousUser
+    reveal_type(request.user.is_superuser)  # revealed: bool
+
+    if request.user.is_authenticated:
+        reveal_type(request.user)  # revealed: AbstractUser
+```
+
+The result of `get_user_model()` is a variable, so it cannot be used as a type:
+
+```py
 # TODO: Should not be an error.
 # error: [invalid-type-form]
 def _(user: User):
-    # TODO: Should be `User`.
+    # TODO: Should be `AbstractUser`.
     reveal_type(user)  # revealed: Unknown
-
-# TODO: Should not be an error, and the type should be `User`.
-# error: [missing-attribute]
-reveal_type(User.objects.create_user("alice"))  # revealed: Unknown
-
-def _(request: HttpRequest):
-    # TODO: Should be `User | AnonymousUser`.
-    reveal_type(request.user)  # revealed: AbstractBaseUser | AnonymousUser
-
-    # TODO: Should not be an error.
-    # error: [missing-union-attribute]
-    request.user.is_superuser
 ```
 
 ## Primary key of an abstract model's subclasses
@@ -759,14 +765,25 @@ class Status(models.TextChoices):
     DRAFT = "D", "Draft"
     PUBLISHED = "P", "Published"
 
+class Priority(models.IntegerChoices):
+    LOW = 1, "Low"
+    HIGH = 2, "High"
+
 class Article(models.Model):
-    # TODO: Should not be an error.
-    # error: [invalid-argument-type]
-    status = models.CharField(max_length=1, choices=Status, default=Status.DRAFT)
+    status = models.CharField(max_length=1, choices=Status, default=Status.DRAFT)  # ok
+    priority = models.IntegerField(choices=Priority, default=Priority.LOW)  # ok
 
 def _(article: Article):
     reveal_type(article.status)  # revealed: str
     reveal_type(article.get_status_display())  # revealed: str
+    reveal_type(article.get_priority_display())  # revealed: str
+```
+
+Other classes are still rejected:
+
+```py
+class Comment(models.Model):
+    status = models.CharField(max_length=1, choices=int)  # error: [invalid-argument-type]
 ```
 
 ## Custom `QuerySet` methods on managers
@@ -792,10 +809,24 @@ reveal_type(Article.objects.all().published())  # revealed: ArticleQuerySet
 reveal_type(Article.objects.published())  # revealed: ArticleQuerySet
 reveal_type(Article.objects.published().published())  # revealed: ArticleQuerySet
 
-# TODO: Should not be an error, and the type should be `ArticleQuerySet`. django-stubs declares
-# the return type of `from_queryset` as `type[Self]`, which loses the `QuerySet` class.
-# error: [missing-attribute]
-reveal_type(Article.reviewed.published())  # revealed: Unknown
+reveal_type(Article.reviewed)  # revealed: Manager[Article, ArticleQuerySet]
+reveal_type(Article.reviewed.published())  # revealed: ArticleQuerySet
+```
+
+The class that `from_queryset()` returns can also be used as a base class:
+
+```py
+class ArticleManager(models.Manager.from_queryset(ArticleQuerySet)):
+    def drafts(self) -> ArticleQuerySet:
+        return self.filter(published=False)
+
+class Draft(models.Model):
+    published = models.BooleanField(default=False)
+
+    objects = ArticleManager()
+
+reveal_type(Draft.objects.drafts())  # revealed: ArticleQuerySet
+reveal_type(Draft.objects.published())  # revealed: ArticleQuerySet
 ```
 
 The manager only has the public methods that the custom `QuerySet` class adds. Django does not copy

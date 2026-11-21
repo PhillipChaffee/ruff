@@ -1,7 +1,8 @@
 use ruff_db::parsed::parsed_module;
 use ruff_python_ast::name::Name;
-use ty_module_resolver::KnownModule;
+use ty_module_resolver::{KnownModule, file_to_module};
 use ty_python_core::{
+    ProgramFile,
     definition::{Definition, DefinitionKind},
     place_table, semantic_index, use_def_map,
 };
@@ -441,6 +442,104 @@ pub(in crate::types) fn foreign_key_model_type<'db>(
     } else {
         model
     })
+}
+
+/// Return the type that one of django-stubs' type aliases denotes, if we replace it.
+///
+/// `ty` is the type that the alias denotes according to the stubs.
+///
+/// `_User` in `django.contrib.auth.models` is the stubs' placeholder for the model named by the
+/// `AUTH_USER_MODEL` setting. It is declared as `AbstractBaseUser` and used wherever Django
+/// returns the user model, such as `get_user_model()` and `HttpRequest.user`. The stubs expect a
+/// type checker to refine it. We do not read settings, so we use `AbstractUser`: it is the base
+/// class of Django's default `User` model and of most custom user models, and it has the
+/// attributes that `AbstractBaseUser` lacks, such as `username` and `is_superuser`.
+///
+/// `_ChoicesPrimitive` in `django.utils.choices` is the type of the `choices` argument of a
+/// field. Its `type[Choices]` element is currently lost when we simplify the union (see
+/// <https://github.com/astral-sh/ty/issues/4551>), which rejects `choices=SomeChoicesClass`. We
+/// add the metaclass `ChoicesType`, whose instances are the same class objects.
+pub(in crate::types) fn type_alias_override<'db>(
+    db: &'db dyn Db,
+    file: ProgramFile<'db>,
+    name: &str,
+    ty: Type<'db>,
+) -> Option<Type<'db>> {
+    // Check the name first to avoid a module-resolution query for every type alias.
+    let module = match name {
+        "_User" => KnownModule::DjangoContribAuthModels,
+        "_ChoicesPrimitive" => KnownModule::DjangoUtilsChoices,
+        _ => return None,
+    };
+    if !file_to_module(db, file.resolver_file(db))
+        .is_some_and(|file_module| file_module.is_known(db, module))
+    {
+        return None;
+    }
+
+    let env = ProgramEnvironment::from_file(file);
+    let instance_of = |module, class| {
+        known_module_symbol(db, &env, module, class)
+            .place
+            .ignore_possibly_undefined()?
+            .to_instance_approximation(db, &env)
+    };
+    match module {
+        KnownModule::DjangoContribAuthModels => instance_of(module, "AbstractUser"),
+        _ => Some(UnionType::from_two_elements(
+            db,
+            &env,
+            ty,
+            instance_of(KnownModule::DjangoDbModelsEnums, "ChoicesType")?,
+        )),
+    }
+}
+
+/// Return the manager class that `Manager.from_queryset()` creates.
+///
+/// django-stubs declares the return type as `type[Self]`, which loses the `QuerySet` class. We
+/// specialize the manager with the model and the `QuerySet` class instead, so that the manager
+/// has the methods of the custom `QuerySet`:
+/// ```py
+/// class BookQuerySet(models.QuerySet["Book"]): ...
+///
+/// # BookManager is Manager[Book, BookQuerySet]
+/// BookManager = models.Manager.from_queryset(BookQuerySet)
+/// ```
+pub(in crate::types) fn from_queryset_return_type<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+    manager: Type<'db>,
+    binding: &Binding<'db>,
+) -> Option<Type<'db>> {
+    let (manager, _) = manager.to_class_type(db)?.static_class_literal(db)?;
+    // A manager class that fixes its own type arguments cannot be specialized again.
+    if manager.generic_context(db)?.len(db) != 2
+        || !manager
+            .iter_mro(db, None)
+            .filter_map(ClassBase::into_class)
+            .any(|base| base.is_known(db, KnownClass::DjangoBaseManager))
+    {
+        return None;
+    }
+
+    let queryset = binding
+        .parameter_type_by_name(db, "queryset_class", false)
+        .ok()??
+        .to_instance_approximation(db, env)?;
+    let model = queryset
+        .nominal_class(db, env)?
+        .iter_mro(db)
+        .filter_map(ClassBase::into_class)
+        .filter_map(|base| base.static_class_literal(db))
+        .find(|(base, _)| base.is_known(db, KnownClass::DjangoQuerySet))
+        .and_then(|(_, specialization)| specialization?.types(db).first().copied())?;
+
+    Some(Type::from(
+        manager.apply_specialization(db, |generic_context| {
+            generic_context.specialize(db, vec![model, queryset])
+        }),
+    ))
 }
 
 /// Synthesize `<field>_id` attributes for foreign keys using the referenced field's type.

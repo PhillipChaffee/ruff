@@ -277,8 +277,12 @@ pub enum KnownModule {
     #[strum(serialize = "struct", serialize = "_struct")]
     Struct,
     // Third-party modules
+    #[strum(serialize = "django.contrib.auth.models")]
+    DjangoContribAuthModels,
     #[strum(serialize = "django.db.models.base")]
     DjangoDbModelsBase,
+    #[strum(serialize = "django.db.models.enums")]
+    DjangoDbModelsEnums,
     #[strum(serialize = "django.db.models.fields")]
     DjangoDbModelsFields,
     #[strum(serialize = "django.db.models.fields.related")]
@@ -287,6 +291,8 @@ pub enum KnownModule {
     DjangoDbModelsManager,
     #[strum(serialize = "django.db.models.query")]
     DjangoDbModelsQuery,
+    #[strum(serialize = "django.utils.choices")]
+    DjangoUtilsChoices,
     #[strum(serialize = "pydantic.config")]
     PydanticConfig,
     #[strum(serialize = "pydantic.fields")]
@@ -346,11 +352,14 @@ impl KnownModule {
             Self::Templatelib => "string.templatelib",
             Self::Numbers => "numbers",
             Self::Struct => "struct",
+            Self::DjangoContribAuthModels => "django.contrib.auth.models",
             Self::DjangoDbModelsBase => "django.db.models.base",
+            Self::DjangoDbModelsEnums => "django.db.models.enums",
             Self::DjangoDbModelsFields => "django.db.models.fields",
             Self::DjangoDbModelsFieldsRelated => "django.db.models.fields.related",
             Self::DjangoDbModelsManager => "django.db.models.manager",
             Self::DjangoDbModelsQuery => "django.db.models.query",
+            Self::DjangoUtilsChoices => "django.utils.choices",
             Self::PydanticConfig => "pydantic.config",
             Self::PydanticFields => "pydantic.fields",
             Self::PydanticFunctionalValidators => "pydantic.functional_validators",
@@ -385,11 +394,14 @@ impl KnownModule {
     /// Return `true` if this module is provided by a supported third-party package.
     pub const fn is_third_party(self) -> bool {
         match self {
-            Self::DjangoDbModelsBase
+            Self::DjangoContribAuthModels
+            | Self::DjangoDbModelsBase
+            | Self::DjangoDbModelsEnums
             | Self::DjangoDbModelsFields
             | Self::DjangoDbModelsFieldsRelated
             | Self::DjangoDbModelsManager
             | Self::DjangoDbModelsQuery
+            | Self::DjangoUtilsChoices
             | Self::PydanticConfig
             | Self::PydanticFields
             | Self::PydanticFunctionalValidators
