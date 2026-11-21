@@ -331,13 +331,8 @@ source model name followed by `_set`. The `related_name` parameter overrides thi
 
 ```py
 def _(author: Author):
-    # TODO: Should not be an error, and the type should be `QuerySet[Book]`.
-    # error: [missing-attribute]
-    reveal_type(author.book_set.all())  # revealed: Unknown
-
-    # TODO: Should not be an error, and the type should be `QuerySet[Book]`.
-    # error: [missing-attribute]
-    reveal_type(author.edited_books.all())  # revealed: Unknown
+    reveal_type(author.book_set.all())  # revealed: QuerySet[Book, Book]
+    reveal_type(author.edited_books.all())  # revealed: QuerySet[Book, Book]
 ```
 
 Setting `related_name="+"` disables the reverse accessor:
@@ -692,9 +687,7 @@ class Profile(models.Model):
     author = models.OneToOneField(Author, on_delete=models.CASCADE)
 
 def _(author: Author):
-    # TODO: Should not be an error, and the type should be `Profile`.
-    # error: [missing-attribute]
-    reveal_type(author.profile)  # revealed: Unknown
+    reveal_type(author.profile)  # revealed: Profile
 ```
 
 A `related_name` on an abstract model can contain `%(class)s`, which Django replaces with the
@@ -711,9 +704,50 @@ class Book(Publication):
     pass
 
 def _(author: Author):
-    # TODO: Should not be an error, and the type should be `QuerySet[Book]`.
+    reveal_type(author.books)  # revealed: RelatedManager[Book, QuerySet[Book, Book]]
+    reveal_type(author.books.first())  # revealed: Book | None
+
+    # An abstract model has no reverse accessor of its own.
+    author.publications  # error: [missing-attribute]
+```
+
+A relation to `"self"` adds the reverse accessor to the model itself:
+
+```py
+class Category(models.Model):
+    parent = models.ForeignKey("self", null=True, on_delete=models.SET_NULL, related_name="children")
+
+def _(category: Category):
+    reveal_type(category.children.first())  # revealed: Category | None
+```
+
+## Reverse accessors across modules
+
+We only find the relation fields of models in the module that defines the related model. A relation
+that is declared in another module does not add a reverse accessor yet:
+
+`library.py`:
+
+```py
+from django.db import models
+
+class Author(models.Model):
+    pass
+```
+
+`shop.py`:
+
+```py
+from django.db import models
+from library import Author
+
+class Order(models.Model):
+    author = models.ForeignKey(Author, on_delete=models.CASCADE)
+
+def _(author: Author):
+    # TODO: Should not be an error, and the type should be `QuerySet[Order, Order]`.
     # error: [missing-attribute]
-    reveal_type(author.books.all())  # revealed: Unknown
+    reveal_type(author.order_set.all())  # revealed: Unknown
 ```
 
 ## User model
@@ -1274,9 +1308,7 @@ class Ebook(Book):
     pass
 
 def _(book: Book):
-    # TODO: Should not be an error, and the type should be `Ebook`.
-    # error: [missing-attribute]
-    reveal_type(book.ebook)  # revealed: Unknown
+    reveal_type(book.ebook)  # revealed: Ebook
 ```
 
 ## Choices attributes

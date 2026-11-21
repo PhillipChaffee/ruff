@@ -4,7 +4,7 @@ use ty_module_resolver::{KnownModule, file_to_module};
 use ty_python_core::{
     ProgramFile,
     definition::{Definition, DefinitionKind},
-    place_table, semantic_index, use_def_map,
+    global_scope, place_table, semantic_index, use_def_map,
 };
 
 use crate::place::{global_symbol, known_module_symbol, place_from_bindings};
@@ -127,6 +127,14 @@ impl<'db> Field<'db> {
                     .as_string_literal()
                     .map(|name| Name::new(name.value(db)))
             });
+        field.metadata.related_name =
+            call.arguments
+                .find_keyword("related_name")
+                .and_then(|related_name| {
+                    definition_expression_type(db, definition, &related_name.value)
+                        .as_string_literal()
+                        .map(|name| Name::new(name.value(db)))
+                });
         field.metadata.parent_link =
             call.arguments
                 .find_keyword("parent_link")
@@ -147,6 +155,7 @@ struct FieldMetadata {
     null: bool,
     to_field: Option<Name>,
     parent_link: bool,
+    related_name: Option<Name>,
 }
 
 /// All fields defined on this Django model (not including base class fields).
@@ -289,7 +298,12 @@ pub(in crate::types) fn synthesized_member<'db>(
         return manager_queryset_method(db, env, specialization?, name);
     }
 
-    // A quick filter on the name, so that we can return quickly for almost all attribute names.
+    // Django does not create members with a private name.
+    if name.starts_with('_') || !is_model(db, class) {
+        return None;
+    }
+    // A quick filter on the name of the members that depend on the fields of the model. A reverse
+    // accessor can have any name.
     if !(matches!(name, "id" | "pk")
         || name.ends_with("_id")
         || name.ends_with("_ptr")
@@ -297,18 +311,177 @@ pub(in crate::types) fn synthesized_member<'db>(
         || name.starts_with("get_next_by_")
         || name.starts_with("get_previous_by_"))
     {
-        return None;
-    }
-    if !is_model(db, class) {
-        return None;
+        return reverse_accessor(db, class, name);
     }
     match name {
         "id" | "pk" => primary_key_member(db, env, class, specialization, name),
         _ => display_method(db, env, class, specialization, name)
             .or_else(|| date_navigation_method(db, env, class, specialization, name))
             .or_else(|| foreign_key_id_member(db, env, class, specialization, name))
-            .or_else(|| parent_link_member(db, env, class, specialization, name)),
+            .or_else(|| parent_link_member(db, env, class, specialization, name))
+            .or_else(|| reverse_accessor(db, class, name)),
     }
+}
+
+/// An attribute that a relation field adds to the model it refers to.
+#[derive(Debug, Clone, PartialEq, Eq, get_size2::GetSize, salsa::SalsaValue)]
+struct ReverseAccessor<'db> {
+    name: Name,
+    ty: Type<'db>,
+}
+
+/// Synthesize the reverse accessors of a model.
+///
+/// A `ForeignKey` adds a manager for the source model to the related model, and a
+/// `OneToOneField` adds the source model instance. The default name is the lowercase name of the
+/// source model, followed by `_set` for a `ForeignKey`:
+/// ```py
+/// class Author(models.Model):
+///     pass
+///
+/// class Book(models.Model):
+///     author = models.ForeignKey(Author, on_delete=models.CASCADE)
+///
+/// class Profile(models.Model):
+///     author = models.OneToOneField(Author, on_delete=models.CASCADE)
+///
+/// # Author().book_set is a manager for Book; Author().profile has type Profile.
+/// ```
+///
+/// We only find relation fields of the models in the module that defines the related model.
+fn reverse_accessor<'db>(
+    db: &'db dyn Db,
+    class: StaticClassLiteral<'db>,
+    name: &str,
+) -> Option<Type<'db>> {
+    reverse_accessors(db, class)
+        .iter()
+        .find(|accessor| accessor.name == name)
+        .map(|accessor| accessor.ty)
+}
+
+/// All reverse accessors that the models in the module of `class` add to it.
+#[salsa::tracked(returns(deref), cycle_initial=|_, _, _| Box::default(), heap_size=ruff_memory_usage::heap_size)]
+fn reverse_accessors<'db>(
+    db: &'db dyn Db,
+    class: StaticClassLiteral<'db>,
+) -> Box<[ReverseAccessor<'db>]> {
+    let scope = global_scope(db, class.body_scope(db).program_file(db));
+    let env = ProgramEnvironment::from_scope(scope);
+    let target = Type::instance(db, &env, class.default_specialization(db));
+
+    let sources = use_def_map(db, scope)
+        .all_end_of_scope_symbol_bindings()
+        .flat_map(|(_, bindings)| bindings.filter_map(|binding| binding.binding.definition()))
+        .filter_map(|definition| binding_type(db, definition).as_class_literal()?.as_static())
+        // Abstract models have no table, so nothing can refer to their rows.
+        .filter(|source| is_model(db, *source) && !model_metadata(db, *source).is_abstract);
+
+    let mut accessors = Vec::new();
+    for source in sources {
+        let source_name = source.name(db).to_lowercase();
+        let source_ty = Type::instance(db, &env, source.default_specialization(db));
+
+        // A model that inherits from a concrete model is reachable from its parent.
+        if source != class
+            && !model_metadata(db, source).is_proxy
+            && source
+                .explicit_bases(db)
+                .iter()
+                .filter_map(|base| concrete_model(db, base.to_class_type(db)?))
+                .any(|parent| {
+                    parent.static_class_literal(db).map(|(parent, _)| parent) == Some(class)
+                })
+        {
+            accessors.push(ReverseAccessor {
+                name: Name::new(&source_name),
+                ty: source_ty,
+            });
+        }
+
+        // The fields of the model itself, and the ones it inherits from abstract models.
+        let declaring_classes = source
+            .iter_mro(db, None)
+            .filter_map(ClassBase::into_class)
+            .filter_map(|base| base.static_class_literal(db))
+            .map(|(base, _)| base)
+            .filter(|base| {
+                *base == source || (is_model(db, *base) && model_metadata(db, *base).is_abstract)
+            });
+        for declaring in declaring_classes {
+            for field in own_model_fields(db, declaring) {
+                let Some((field_class, _)) = field
+                    .ty
+                    .nominal_class(db, &env)
+                    .and_then(|field_class| field_class.static_class_literal(db))
+                else {
+                    continue;
+                };
+                if !is_foreign_key(db, field_class)
+                    || related_model(db, &env, declaring, source, field) != Some(target)
+                {
+                    continue;
+                }
+                let is_one_to_one = field_class
+                    .iter_mro(db, None)
+                    .filter_map(ClassBase::into_class)
+                    .any(|base| base.name(db) == "OneToOneField");
+                let name = match field.metadata.related_name.as_deref() {
+                    // A name that ends with `+` disables the reverse accessor. We do not know the
+                    // app label of a model.
+                    Some(related_name)
+                        if related_name.ends_with('+')
+                            || related_name.contains("%(app_label)s") =>
+                    {
+                        continue;
+                    }
+                    Some(related_name) => related_name.replace("%(class)s", &source_name),
+                    None if is_one_to_one => source_name.clone(),
+                    None => format!("{source_name}_set"),
+                };
+                let ty = if is_one_to_one {
+                    Some(source_ty)
+                } else {
+                    related_manager(db, &env, source_ty)
+                };
+                if let Some(ty) = ty {
+                    accessors.push(ReverseAccessor {
+                        name: Name::new(name),
+                        ty,
+                    });
+                }
+            }
+        }
+    }
+    accessors.into_boxed_slice()
+}
+
+/// Return the type of the manager that a `ForeignKey` adds to its related model.
+fn related_manager<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+    model: Type<'db>,
+) -> Option<Type<'db>> {
+    let manager = known_module_symbol(
+        db,
+        env,
+        KnownModule::DjangoDbModelsFieldsRelatedDescriptors,
+        "RelatedManager",
+    )
+    .place
+    .ignore_possibly_undefined()?
+    .as_class_literal()?
+    .as_static()?;
+    let generic_context = manager.generic_context(db)?;
+    (generic_context.len(db) == 2).then(|| {
+        Type::instance(
+            db,
+            env,
+            manager.apply_specialization(db, |generic_context| {
+                generic_context.specialize_partial(db, [Some(model), None])
+            }),
+        )
+    })
 }
 
 /// Synthesize the methods that a manager copies from its `QuerySet` class.
@@ -618,7 +791,8 @@ fn foreign_key_id_type<'db>(
     })
 }
 
-/// Return the model that a relation field of the model `class` refers to.
+/// Return the model that a relation field of `model` refers to. `declaring` is the class whose
+/// body declares the field: `model` itself or one of its abstract base classes.
 ///
 /// The related model is the first argument of the field construction. It can be a class, the
 /// name of a model in the same module, or `"self"` for the model that declares the field:
@@ -632,17 +806,18 @@ fn foreign_key_id_type<'db>(
 fn related_model<'db>(
     db: &'db dyn Db,
     env: &ProgramEnvironment<'db>,
-    class: StaticClassLiteral<'db>,
+    declaring: StaticClassLiteral<'db>,
+    model: StaticClassLiteral<'db>,
     field: &Field<'db>,
 ) -> Option<Type<'db>> {
     let to = field.to?;
-    let model = match to.as_string_literal() {
+    let related = match to.as_string_literal() {
         Some(reference) if reference.value(db) == "self" => {
-            return Some(Type::instance(db, env, class.default_specialization(db)));
+            return Some(Type::instance(db, env, model.default_specialization(db)));
         }
         Some(reference) => global_symbol(
             db,
-            class.body_scope(db).program_file(db),
+            declaring.body_scope(db).program_file(db),
             reference.value(db),
         )
         .place
@@ -651,8 +826,8 @@ fn related_model<'db>(
     }
     .to_instance_approximation(db, env)?;
 
-    let (model_class, _) = model.nominal_class(db, env)?.static_class_literal(db)?;
-    is_model(db, model_class).then_some(model)
+    let (related_class, _) = related.nominal_class(db, env)?.static_class_literal(db)?;
+    is_model(db, related_class).then_some(related)
 }
 
 /// Return a more precise type for the relation field `name` of the model `class`, if the stubs
@@ -693,7 +868,7 @@ pub(in crate::types) fn refined_field_type<'db>(
     let field = own_model_fields(db, class)
         .iter()
         .find(|field| field.name == name)?;
-    let model = related_model(db, env, class, field)?;
+    let model = related_model(db, env, class, class, field)?;
     let value = if field.metadata.null {
         UnionType::from_two_elements(db, env, model, Type::none(db, env))
     } else {
