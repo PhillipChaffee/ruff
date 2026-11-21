@@ -1,7 +1,7 @@
 use ruff_db::parsed::parsed_module;
 use ruff_python_ast::name::Name;
 use rustc_hash::FxHashSet;
-use ty_module_resolver::{KnownModule, file_to_module};
+use ty_module_resolver::{ImportingFile, KnownModule, ModuleName, file_to_module, resolve_module};
 use ty_python_core::{
     ProgramFile,
     definition::{Definition, DefinitionKind},
@@ -1093,7 +1093,7 @@ fn foreign_key_id_type<'db>(
 ///     sequel = models.ForeignKey("self", null=True, on_delete=models.SET_NULL)
 /// ```
 ///
-/// A reference with an app label, such as `"library.Author"`, is not resolved.
+/// A reference with an app label, such as `"library.Author"`, names a model of another app.
 fn related_model<'db>(
     db: &'db dyn Db,
     env: &ProgramEnvironment<'db>,
@@ -1118,19 +1118,59 @@ fn model_reference<'db>(
         Some(reference) if reference.value(db) == "self" => {
             return Some(Type::instance(db, env, model.default_specialization(db)));
         }
-        Some(reference) => global_symbol(
-            db,
-            declaring.body_scope(db).program_file(db),
-            reference.value(db),
-        )
-        .place
-        .ignore_possibly_undefined()?,
+        Some(reference) => {
+            let file = declaring.body_scope(db).program_file(db);
+            match reference.value(db).split_once('.') {
+                Some((app_label, name)) => app_model_symbol(db, env, file, app_label, name)?,
+                None => global_symbol(db, file, reference.value(db))
+                    .place
+                    .ignore_possibly_undefined()?,
+            }
+        }
         None => to,
     }
     .to_instance_approximation(db, env)?;
 
     let (related_class, _) = related.nominal_class(db, env)?.static_class_literal(db)?;
     is_model(db, related_class).then_some(related)
+}
+
+/// Look up `name` in the `models` module of the app with the label `app_label`, for a reference
+/// such as `"library.Author"` in `file`.
+///
+/// An app's label is by default the last component of its package name, and its models are
+/// importable from the `models` module of that package. We do not read the project's settings to
+/// find the installed apps. Instead, we look for a package named `app_label` next to each package
+/// that contains `file`, starting with the innermost. For a reference in `shop/reviews/models.py`,
+/// we try `shop.reviews.library.models`, `shop.library.models` and then `library.models`.
+///
+/// An app that sets a different label in its `AppConfig` is not found.
+fn app_model_symbol<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+    file: ProgramFile<'db>,
+    app_label: &str,
+    name: &str,
+) -> Option<Type<'db>> {
+    let models = ModuleName::from_components([app_label, "models"])?;
+    let importing_file = ImportingFile::File(file.file(db), env.resolver_environment(db));
+    let containing_packages = file_to_module(db, file.resolver_file(db))?
+        .name(db)
+        .ancestors()
+        .skip(1);
+
+    containing_packages
+        .map(|mut package| {
+            package.extend(&models);
+            package
+        })
+        .chain(std::iter::once(models.clone()))
+        .find_map(|candidate| {
+            let module = resolve_module(db, importing_file, &candidate)?.file(db)?;
+            global_symbol(db, ProgramFile::new(db, module, env.program(db)), name)
+                .place
+                .ignore_possibly_undefined()
+        })
 }
 
 /// Return a more precise type for the relation field `name` of the model `class`, if the stubs
