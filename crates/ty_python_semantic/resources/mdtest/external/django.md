@@ -295,6 +295,36 @@ def _(book: Book):
     book.author = None  # error: [invalid-assignment]
 ```
 
+A generic subclass of `ForeignKey` behaves like `ForeignKey`:
+
+```py
+class TrackedForeignKey[ST, GT](models.ForeignKey[ST, GT]):
+    pass
+
+class Chapter(models.Model):
+    book = TrackedForeignKey(Book, on_delete=models.CASCADE)
+
+def _(chapter: Chapter):
+    reveal_type(chapter.book)  # revealed: Book
+    reveal_type(chapter.book_id)  # revealed: int
+```
+
+A subclass that does not declare type parameters has no place to record the related model:
+
+```py
+class PlainForeignKey(models.ForeignKey):
+    pass
+
+class Page(models.Model):
+    book = PlainForeignKey(Book, on_delete=models.CASCADE)
+
+def _(page: Page):
+    # TODO: Should be `Book`.
+    reveal_type(page.book)  # revealed: Any
+    # TODO: Should be `int`.
+    reveal_type(page.book_id)  # revealed: Any
+```
+
 A `ForeignKey` adds a reverse accessor to the related model. By default, its name is the lowercase
 source model name followed by `_set`. The `related_name` parameter overrides this name:
 

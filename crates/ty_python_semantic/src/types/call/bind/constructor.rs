@@ -10,8 +10,8 @@ use crate::types::generics::{GenericContext, Specialization};
 use crate::types::signatures::Parameter;
 use crate::types::typevar::TypeVarNonceGenerator;
 use crate::types::{
-    ApplyTypeMappingVisitor, BoundTypeVarInstance, ClassLiteral, DynamicType, KnownClass, Type,
-    TypeContext, TypeMapping, UnionType,
+    ApplyTypeMappingVisitor, BoundTypeVarInstance, ClassLiteral, DynamicType, Type, TypeContext,
+    TypeMapping, UnionType,
 };
 
 impl<'db> CallableBinding<'db> {
@@ -507,7 +507,7 @@ impl<'db> ConstructorBinding<'db> {
             };
             if let [write, read] = types.as_mut_slice()
                 && (write.is_none() || read.is_none())
-                && class_literal.is_known(db, KnownClass::DjangoForeignKey)
+                && django::is_foreign_key(db, class_literal)
                 && let Some(model) = django::foreign_key_model_type(db, env, overload)
             {
                 write.get_or_insert(model);

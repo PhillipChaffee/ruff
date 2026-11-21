@@ -26,6 +26,22 @@ pub(in crate::types) fn is_model<'db>(db: &'db dyn Db, class: StaticClassLiteral
         .any(|base| base.is_known(db, KnownClass::DjangoModel))
 }
 
+/// Returns whether `class` is Django's `ForeignKey` or one of its subclasses.
+///
+/// `OneToOneField` is a subclass of `ForeignKey`, and so is a user-defined relation field:
+/// ```py
+/// class TrackedForeignKey(models.ForeignKey): ...
+/// ```
+pub(in crate::types) fn is_foreign_key<'db>(
+    db: &'db dyn Db,
+    class: StaticClassLiteral<'db>,
+) -> bool {
+    class
+        .iter_mro(db, None)
+        .filter_map(ClassBase::into_class)
+        .any(|base| base.is_known(db, KnownClass::DjangoForeignKey))
+}
+
 /// The type of a Django model field, and metadata extracted from the field construction.
 ///
 /// For example, `isbn` is a `CharField` with `metadata.primary_key` set to `true`.
