@@ -73,10 +73,9 @@ Book(
 Invalid field types lead to a type error:
 
 ```py
-# TODO: Reject the invalid type for `published`.
 Book(
     title="The Hitchhiker's Guide to the Galaxy",
-    published=123,
+    published=123,  # error: [invalid-argument-type]
     pages=180,
 )
 ```
@@ -84,12 +83,84 @@ Book(
 Unrecognized keyword arguments also lead to an error:
 
 ```py
-# TODO: Reject the unknown keyword `publised`.
 Book(
     title="The Hitchhiker's Guide to the Galaxy",
-    publised=date(1979, 10, 12),
+    publised=date(1979, 10, 12),  # error: [unknown-argument]
     pages=180,
 )
+```
+
+## Constructor arguments
+
+Besides its fields, a model accepts keywords for the primary key, for the ID attribute of a foreign
+key, and for its properties:
+
+```py
+from django.db import models
+
+class Author(models.Model):
+    name = models.CharField(max_length=100)
+
+class Book(models.Model):
+    title = models.CharField(max_length=200)
+    author = models.ForeignKey(Author, on_delete=models.CASCADE)
+
+    @property
+    def label(self) -> str:
+        return self.title
+
+    @label.setter
+    def label(self, value: str) -> None:
+        self.title = value
+
+def _(author: Author):
+    Book(id=1, title="Dune", author=author)  # ok
+    Book(pk=1, author_id=author.pk, label="Dune")  # ok
+
+    Book(author="Frank Herbert")  # error: [invalid-argument-type]
+    Book(describe="Dune")  # error: [unknown-argument]
+```
+
+Positional arguments are not checked:
+
+```py
+Book(1, "Dune", 1)  # ok
+```
+
+A model also accepts the fields of its base classes, and the link to a concrete parent:
+
+```py
+class Timestamped(models.Model):
+    created = models.DateTimeField()
+
+    class Meta:
+        abstract = True
+
+class Ebook(Book, Timestamped):
+    size = models.IntegerField()
+
+def _(book: Book):
+    Ebook(title="Dune", created="2024-01-01", size=1, book_ptr=book)  # ok
+    Ebook(size=None)  # error: [invalid-argument-type]
+    Ebook(pages=1)  # error: [unknown-argument]
+```
+
+A model that defines `__init__` is checked against that method instead:
+
+```py
+from typing import Any
+
+class Custom(models.Model):
+    title = models.CharField(max_length=200)
+
+    def __init__(self, *args: Any, source: str = "", **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+
+class CustomChild(Custom):
+    pass
+
+Custom(source="import", anything=1)  # ok
+CustomChild(source="import", anything=1)  # ok
 ```
 
 ## Nullable fields
@@ -131,8 +202,7 @@ article.views  # error: [missing-attribute]
 Article(view_count=1)
 
 # Using the original attribute name is incorrect.
-# TODO: Reject the unknown keyword `views`.
-Article(views=1)
+Article(views=1)  # error: [unknown-argument]
 ```
 
 ## Primary keys

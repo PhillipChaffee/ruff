@@ -1,5 +1,6 @@
 use ruff_db::parsed::parsed_module;
 use ruff_python_ast::name::Name;
+use rustc_hash::FxHashSet;
 use ty_module_resolver::{KnownModule, file_to_module};
 use ty_python_core::{
     ProgramFile,
@@ -312,7 +313,10 @@ pub(in crate::types) fn synthesized_member<'db>(
         return manager_queryset_method(db, env, specialization?, name);
     }
 
-    // Django does not create members with a private name.
+    if name == "__init__" && is_model(db, class) {
+        return init_method(db, env, class, specialization);
+    }
+    // Django does not create other members with a private name.
     if name.starts_with('_') || !is_model(db, class) {
         return None;
     }
@@ -338,6 +342,148 @@ pub(in crate::types) fn synthesized_member<'db>(
             .or_else(|| parent_link_member(db, env, class, specialization, name))
             .or_else(|| reverse_accessor(db, class, name)),
     }
+}
+
+/// Synthesize the `__init__` method of a model, with one keyword parameter per name that Django's
+/// `Model.__init__` accepts.
+///
+/// The stubs declare `Model.__init__(self, *args: Any, **kwargs: Any)`. Django itself rejects a
+/// keyword that names neither a field nor a property, so `Book(title="Dune")` raises a `TypeError`
+/// here:
+/// ```py
+/// class Book(models.Model):
+///     title = models.CharField(max_length=200)
+///     author = models.ForeignKey(Author, on_delete=models.CASCADE)
+/// ```
+///
+/// For this model, we construct
+/// `def __init__(self, *args: Any, title: str | int | Combinable = ..., author: ... = ...,
+/// author_id: Any = ..., id: Any = ..., pk: Any = ...) -> None`. A field's parameter has the type
+/// that an assignment to the field accepts. Every keyword is optional because fields can be
+/// assigned after construction, and positional arguments are not checked.
+///
+/// Returns `None`, which keeps the declared `__init__`, if we cannot see everything that the model
+/// inherits or if a base class between the model and `Model` defines its own `__init__`.
+fn init_method<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+    class: StaticClassLiteral<'db>,
+    specialization: Option<Specialization<'db>>,
+) -> Option<Type<'db>> {
+    let any = Type::any();
+    let mut keywords: Vec<(Name, Type<'db>)> = vec![(Name::new_static("pk"), any)];
+    let mut has_primary_key = false;
+    let mut reached_model = false;
+
+    for base in class.iter_mro(db, specialization) {
+        let base = match base {
+            ClassBase::Class(base) => base,
+            // An unknown base class can add fields and properties that we cannot see.
+            ClassBase::Dynamic(_) => return None,
+            _ => continue,
+        };
+        let (base, base_specialization) = base.static_class_literal(db)?;
+        if base.is_known(db, KnownClass::DjangoModel) {
+            reached_model = true;
+        } else if !reached_model
+            && base != class
+            && class_member(db, base.body_scope(db), "__init__")
+                .ignore_possibly_undefined()
+                .is_some()
+        {
+            return None;
+        }
+
+        // Django also accepts a keyword that names a property, and assigns the value to it.
+        keywords.extend(
+            own_property_names(db, base)
+                .iter()
+                .map(|name| (name.clone(), any)),
+        );
+        if !is_model(db, base) {
+            continue;
+        }
+
+        for field in own_model_fields(db, base) {
+            has_primary_key |= field.metadata.primary_key;
+            let field_ty = refined_field_type(db, env, base, &field.symbol, field.ty)
+                .unwrap_or(field.ty)
+                .apply_optional_specialization(db, base_specialization);
+            let Some(field_class) = field_ty.nominal_class(db, env) else {
+                continue;
+            };
+            // Django prohibits assigning to the forward side of a many-to-many relation.
+            if field_class.name(db) == "ManyToManyField" {
+                continue;
+            }
+            let set_ty = field_class
+                .iter_mro(db)
+                .filter_map(ClassBase::into_class)
+                .filter_map(|field_base| field_base.static_class_literal(db))
+                .find(|(field_base, _)| field_base.is_known(db, KnownClass::DjangoField))
+                .and_then(|(_, specialization)| specialization?.types(db).first().copied())
+                .unwrap_or(any);
+            keywords.push((field.name.clone(), set_ty));
+            if field_class
+                .static_class_literal(db)
+                .is_some_and(|(field_class, _)| is_foreign_key(db, field_class))
+            {
+                keywords.push((Name::new(format!("{}_id", field.name)), any));
+            }
+        }
+
+        // A model that inherits from a concrete model has an automatic link to that parent.
+        if base != class && !model_metadata(db, base).is_abstract {
+            let parent = base.name(db).to_lowercase();
+            keywords.push((Name::new(format!("{parent}_ptr")), any));
+            keywords.push((Name::new(format!("{parent}_ptr_id")), any));
+        }
+    }
+    if !has_primary_key {
+        keywords.push((Name::new_static("id"), any));
+    }
+
+    let self_ty = Type::instance(
+        db,
+        env,
+        class.apply_optional_specialization(db, specialization),
+    );
+    let mut parameters = vec![
+        Parameter::positional_or_keyword(Name::new_static("self")).with_annotated_type(self_ty),
+        Parameter::variadic(Name::new_static("args")).with_annotated_type(any),
+    ];
+    // The first class in the method resolution order that defines a name determines its type.
+    let mut seen = FxHashSet::default();
+    parameters.extend(
+        keywords
+            .into_iter()
+            .filter(|(name, _)| seen.insert(name.clone()))
+            .map(|(name, ty)| {
+                Parameter::keyword_only(name)
+                    .with_annotated_type(ty)
+                    .with_default_type(ty)
+            }),
+    );
+    Some(Type::function_like_callable(
+        db,
+        Signature::new(Parameters::standard(parameters), Type::none(db, env)),
+    ))
+}
+
+/// The names of the properties defined in the body of `class`.
+#[salsa::tracked(returns(deref), heap_size=ruff_memory_usage::heap_size)]
+fn own_property_names<'db>(db: &'db dyn Db, class: StaticClassLiteral<'db>) -> Box<[Name]> {
+    let scope = class.body_scope(db);
+    place_table(db, scope)
+        .symbols()
+        .filter(|symbol| {
+            matches!(
+                class_member(db, scope, symbol.name()).ignore_possibly_undefined(),
+                Some(Type::PropertyInstance(_))
+            )
+        })
+        .map(|symbol| symbol.name().clone())
+        .collect()
 }
 
 /// Synthesize the attribute of a field whose `name` argument differs from the name it is assigned
