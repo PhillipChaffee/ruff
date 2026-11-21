@@ -311,7 +311,8 @@ pub(in crate::types) fn synthesized_member<'db>(
         || name.starts_with("get_next_by_")
         || name.starts_with("get_previous_by_"))
     {
-        return reverse_accessor(db, class, name);
+        return renamed_field(db, class, specialization, name)
+            .or_else(|| reverse_accessor(db, class, name));
     }
     match name {
         "id" | "pk" => primary_key_member(db, env, class, specialization, name),
@@ -321,6 +322,26 @@ pub(in crate::types) fn synthesized_member<'db>(
             .or_else(|| parent_link_member(db, env, class, specialization, name))
             .or_else(|| reverse_accessor(db, class, name)),
     }
+}
+
+/// Synthesize the attribute of a field whose `name` argument differs from the name it is assigned
+/// to. Django creates the attribute under the name given by the argument:
+/// ```py
+/// class Article(models.Model):
+///     views = models.IntegerField(name="view_count")
+///
+/// # Article().view_count has type int.
+/// ```
+fn renamed_field<'db>(
+    db: &'db dyn Db,
+    class: StaticClassLiteral<'db>,
+    specialization: Option<Specialization<'db>>,
+    name: &str,
+) -> Option<Type<'db>> {
+    own_model_fields(db, class)
+        .iter()
+        .find(|field| field.name == name)
+        .map(|field| field.ty.apply_optional_specialization(db, specialization))
 }
 
 /// An attribute that a relation field adds to the model it refers to.
@@ -922,13 +943,7 @@ fn parent_link_member<'db>(
     };
 
     // A proxy model uses the database table of its parent, so there is nothing to link.
-    // A field declared with `parent_link=True` replaces an automatic one. We do not know which
-    // parent it replaces if the model has several, so we do not synthesize any.
-    if model_metadata(db, class).is_proxy
-        || own_model_fields(db, class)
-            .iter()
-            .any(|field| field.metadata.parent_link)
-    {
+    if model_metadata(db, class).is_proxy {
         return None;
     }
 
@@ -939,6 +954,18 @@ fn parent_link_member<'db>(
         .find(|parent| parent.name(db).to_lowercase() == parent_name)?;
     let parent_ty =
         Type::instance(db, env, parent).apply_optional_specialization(db, specialization);
+
+    // A field declared with `parent_link=True` replaces the automatic link to its related model.
+    // If we cannot tell which model that is, we do not synthesize a link.
+    if own_model_fields(db, class)
+        .iter()
+        .filter(|field| field.metadata.parent_link)
+        .any(|field| {
+            related_model(db, env, class, class, field).is_none_or(|related| related == parent_ty)
+        })
+    {
+        return None;
+    }
 
     if is_id {
         parent_ty

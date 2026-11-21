@@ -120,9 +120,9 @@ class Article(models.Model):
 
 article = Article(view_count=1)
 
-# TODO: Should not be an error, and the type should be `int`.
-# error: [missing-attribute]
-reveal_type(article.view_count)  # revealed: Unknown
+reveal_type(article.view_count)  # revealed: int
+article.view_count = 2  # ok
+article.view_count = None  # error: [invalid-assignment]
 
 # The original field name is not available as an attribute.
 # TODO: Should be an missing-attribute error.
@@ -1290,8 +1290,7 @@ class BookProduct(Product, Book):
 def _(book_product: BookProduct):
     reveal_type(book_product.book)  # revealed: Book
     book_product.book_ptr  # error: [missing-attribute]
-    # TODO: Should not be an error, and the type should be `Product`.
-    book_product.product_ptr  # error: [missing-attribute]
+    reveal_type(book_product.product_ptr)  # revealed: Product
 ```
 
 ### Child accessor
