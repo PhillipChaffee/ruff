@@ -2033,6 +2033,27 @@ impl<'db> Bindings<'db> {
 
                     Type::BoundMethod(bound_method)
                         if let Some(function) = bound_method.function(db)
+                            && matches!(
+                                function.name(db).as_str(),
+                                "filter" | "exclude" | "get"
+                            )
+                            && let Some(model) =
+                                django::lookup_model(db, env, bound_method.self_instance(db)) =>
+                    {
+                        for (argument_index, argument) in call_arguments.iter().enumerate() {
+                            if let Argument::Keyword(name) = argument.kind()
+                                && !django::is_lookup_name(db, env, model, name)
+                            {
+                                overload.errors.push(BindingError::UnknownArgument {
+                                    argument_name: Name::new(name),
+                                    argument_index: Some(argument_index),
+                                });
+                            }
+                        }
+                    }
+
+                    Type::BoundMethod(bound_method)
+                        if let Some(function) = bound_method.function(db)
                             && matches!(function.name(db).as_str(), "values" | "values_list") =>
                     {
                         // The matched arguments include the bound `self` argument.
