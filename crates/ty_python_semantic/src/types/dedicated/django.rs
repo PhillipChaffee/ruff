@@ -327,7 +327,7 @@ pub(in crate::types) fn foreign_key_model_type<'db>(
     let to = binding.parameter_type_by_name(db, "to", false).ok()??;
     let model = to.to_instance_approximation(db, env)?;
     let null = binding.parameter_type_by_name(db, "null", false).ok()?;
-    Some(if null == Some(Type::bool_literal(true)) {
+    Some(if null.and_then(Type::as_bool_literal) == Some(true) {
         UnionType::from_two_elements(db, env, model, Type::none(db, env))
     } else {
         model
