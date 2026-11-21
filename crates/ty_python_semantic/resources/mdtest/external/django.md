@@ -1143,9 +1143,27 @@ class Article(models.Model):
 
 article = Article.objects.annotate(title_length=Length("title")).get()
 
-# TODO: Should not be an error, and the type should be `int`.
-# error: [missing-attribute]
-reveal_type(article.title_length)  # revealed: Unknown
+reveal_type(article.title)  # revealed: str
+article.word_count  # error: [missing-attribute]
+```
+
+We do not infer the type of an annotation's expression, so the attribute has the type `Any`:
+
+```py
+reveal_type(article.title_length)  # revealed: Any
+```
+
+The annotated model is still the model, and the other `QuerySet` methods keep the annotations:
+
+```py
+def publish(article: Article) -> None: ...
+
+annotated = Article.objects.annotate(title_length=Length("title")).filter(title_length=7)
+for article in annotated.order_by("title"):
+    publish(article)  # ok
+    reveal_type(article.title_length)  # revealed: Any
+
+reveal_type(annotated.values_list("title").get())  # revealed: tuple[str]
 ```
 
 ## Field assignments

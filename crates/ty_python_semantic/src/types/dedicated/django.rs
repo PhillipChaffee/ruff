@@ -19,8 +19,8 @@ use crate::types::member::class_member;
 use crate::types::typed_dict::{TypedDictFieldBuilder, TypedDictType};
 use crate::types::{
     BindingContext, BoundTypeVarInstance, ClassBase, ClassType, FunctionType, GenericContext,
-    KnownClass, Parameter, Parameters, SelfTypeVarOrigin, Signature, Specialization,
-    StaticClassLiteral, Type, UnionType, binding_type, definition_expression_type,
+    IntersectionType, KnownClass, Parameter, Parameters, SelfTypeVarOrigin, Signature,
+    Specialization, StaticClassLiteral, Type, UnionType, binding_type, definition_expression_type,
 };
 use crate::{Db, FxIndexSet, ProgramEnvironment};
 
@@ -1171,6 +1171,58 @@ pub(in crate::types) fn is_lookup_name<'db>(
                     .iter()
                     .any(|field| field.metadata.related_name.as_deref() == Some(name))
         })
+}
+
+/// Add the attributes that `QuerySet.annotate()` creates to the model of the `QuerySet` it
+/// returns.
+///
+/// `annotate()` sets an attribute on each instance for every keyword argument:
+/// ```py
+/// article = Article.objects.annotate(title_length=Length("title")).get()
+/// article.title_length
+/// ```
+///
+/// `declared` is the return type according to the stubs, the same `QuerySet[Article, Article]`
+/// that the method is called on. We intersect the model with a protocol that has one member per
+/// keyword. The members have the type `Any`, because we do not infer the type of an expression's
+/// result.
+///
+/// Returns `None`, which keeps the declared type, for a `QuerySet` class that fixes its model.
+pub(in crate::types) fn annotate_return_type<'db, 'a>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+    declared: Type<'db>,
+    keywords: impl IntoIterator<Item = &'a str>,
+) -> Option<Type<'db>> {
+    let (queryset, specialization) = declared.nominal_class(db, env)?.static_class_literal(db)?;
+    if !queryset.is_known(db, KnownClass::DjangoQuerySet) {
+        return None;
+    }
+    let &[model, row] = specialization?.types(db) else {
+        return None;
+    };
+
+    let mut annotations = keywords
+        .into_iter()
+        .map(|keyword| (keyword, Type::any()))
+        .peekable();
+    annotations.peek()?;
+    let annotated = IntersectionType::from_two_elements(
+        db,
+        env,
+        model,
+        Type::protocol_with_readonly_members(db, env, annotations),
+    );
+
+    Some(Type::instance(
+        db,
+        env,
+        queryset.apply_specialization(db, |generic_context| {
+            // Rows are model instances unless `values()` or `values_list()` changed their shape.
+            let row = if row == model { annotated } else { row };
+            generic_context.specialize(db, vec![annotated, row])
+        }),
+    ))
 }
 
 /// The shape of the rows that a `QuerySet` method returns for the fields named in its call.

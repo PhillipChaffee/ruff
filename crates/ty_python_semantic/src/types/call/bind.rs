@@ -2053,6 +2053,25 @@ impl<'db> Bindings<'db> {
                     }
 
                     Type::BoundMethod(bound_method)
+                        if bound_method
+                            .function(db)
+                            .is_some_and(|function| function.name(db) == "annotate")
+                            && let Some(queryset) = django::annotate_return_type(
+                                db,
+                                env,
+                                overload.return_type(),
+                                call_arguments.iter().filter_map(|argument| {
+                                    match argument.kind() {
+                                        Argument::Keyword(name) => Some(name),
+                                        _ => None,
+                                    }
+                                }),
+                            ) =>
+                    {
+                        overload.set_return_type(queryset);
+                    }
+
+                    Type::BoundMethod(bound_method)
                         if let Some(function) = bound_method.function(db)
                             && matches!(function.name(db).as_str(), "values" | "values_list") =>
                     {
