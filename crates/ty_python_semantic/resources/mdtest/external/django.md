@@ -838,4 +838,169 @@ article = Article.objects.annotate(title_length=Length("title")).get()
 reveal_type(article.title_length)  # revealed: Unknown
 ```
 
+## Field assignments
+
+django-stubs declares the types that a field accepts on assignment. They are wider than the field's
+value type, because Django converts the value when it saves the instance:
+
+```py
+from django.db import models
+
+class Book(models.Model):
+    title = models.CharField(max_length=200)
+    pages = models.IntegerField()
+
+def _(book: Book):
+    book.title = 3  # ok
+    book.pages = "300"  # ok
+    book.title = None  # error: [invalid-assignment]
+    book.pages = None  # error: [invalid-assignment]
+```
+
+The automatic primary key accepts a string for the same reason. Django also allows resetting it to
+`None`, which makes the next `save()` insert a copy:
+
+```py
+def _(book: Book):
+    book.id = "1"  # ok
+
+    # TODO: Should not be an error.
+    book.pk = None  # error: [invalid-assignment]
+```
+
+## Many-to-many fields
+
+A `ManyToManyField` gives each instance a manager for the related model. The `through` attribute of
+the field is the model of the intermediate table, which Django creates when none is given:
+
+```py
+from django.db import models
+
+class Tag(models.Model):
+    pass
+
+class Book(models.Model):
+    tags = models.ManyToManyField(Tag)
+
+def _(book: Book):
+    reveal_type(book.tags)  # revealed: ManyRelatedManager[Tag, Any]
+    reveal_type(book.tags.all())  # revealed: QuerySet[Tag, Tag]
+
+# TODO: Should be the automatically created `Book_tags` model.
+reveal_type(Book.tags.through)  # revealed: type[Any]
+```
+
+## Managers
+
+The default manager is only available on the model class. Its methods return a `QuerySet`:
+
+```py
+from django.db import models
+
+class Book(models.Model):
+    title = models.CharField(max_length=200)
+
+reveal_type(Book.objects)  # revealed: Manager[Book, QuerySet[Book, Book]]
+reveal_type(Book.objects.all())  # revealed: QuerySet[Book, Book]
+reveal_type(Book.objects.first())  # revealed: Book | None
+
+def _(book: Book):
+    book.objects  # error: [missing-attribute]
+```
+
+A model has no other implicit class attributes:
+
+```py
+# TODO: Should be a `missing-attribute` error.
+Book.nonexistent  # error: [invalid-attribute-access]
+```
+
+## Lookups
+
+The keyword arguments of `filter()` name fields of the model. Django raises `FieldError` for an
+unknown name:
+
+```py
+from django.db import models
+
+class Book(models.Model):
+    title = models.CharField(max_length=200)
+
+# TODO: Should be an error.
+Book.objects.filter(titel="Example")
+```
+
+## Model exceptions
+
+Every model has its own `DoesNotExist` exception, a subclass of `ObjectDoesNotExist`:
+
+```py
+from django.db import models
+
+class Book(models.Model):
+    pass
+
+# TODO: Should be the `DoesNotExist` class of `Book`.
+reveal_type(Book.DoesNotExist)  # revealed: type[ObjectDoesNotExist]
+```
+
+## Multi-table inheritance
+
+A model that inherits from a concrete model has a `<parent>_ptr` field that links to the parent
+model, and the parent has a reverse accessor named after the child:
+
+```py
+from django.db import models
+
+class Book(models.Model):
+    pass
+
+class Ebook(Book):
+    pass
+
+def _(book: Book, ebook: Ebook):
+    # TODO: Should not be an error, and the type should be `Book`.
+    # error: [missing-attribute]
+    reveal_type(ebook.book_ptr)  # revealed: Unknown
+
+    # TODO: Should not be an error, and the type should be `int`.
+    # error: [missing-attribute]
+    reveal_type(ebook.book_ptr_id)  # revealed: Unknown
+
+    # TODO: Should not be an error, and the type should be `Ebook`.
+    # error: [missing-attribute]
+    reveal_type(book.ebook)  # revealed: Unknown
+```
+
+## Choices attributes
+
+A `Choices` class has `choices`, `values` and `labels` attributes, and each member has a `label`:
+
+```py
+from django.db import models
+
+class Status(models.TextChoices):
+    DRAFT = "D", "Draft"
+    PUBLISHED = "P", "Published"
+
+reveal_type(Status.choices)  # revealed: list[tuple[str, str | _StrPromise]]
+reveal_type(Status.values)  # revealed: list[str]
+reveal_type(Status.DRAFT.label)  # revealed: str | _StrPromise
+```
+
+## Settings
+
+`django.conf.settings` gives access to the settings of the project. Django raises `AttributeError`
+for a setting that does not exist:
+
+```py
+from django.conf import settings
+
+# TODO: Should be `bool`.
+reveal_type(settings.DEBUG)  # revealed: Any
+
+# TODO: Should be an error.
+settings.NOT_A_SETTING
+```
+
 [django-stubs]: https://github.com/typeddjango/django-stubs
