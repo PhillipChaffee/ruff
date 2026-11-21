@@ -53,8 +53,7 @@ Attribute assignments are checked against the field's *input* type:
 book.title = "The Restaurant at the End of the Universe"
 book.pages = 208
 
-# TODO: django-types should allow ISO-formatted date strings as input.
-book.published = "1980-10-12"  # error: [invalid-assignment]
+book.published = "1980-10-12"
 
 book.pages = models.F("pages") + 1
 
