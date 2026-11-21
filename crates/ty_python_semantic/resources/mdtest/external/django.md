@@ -1307,16 +1307,55 @@ Book.objects.annotate(title_length=Length("title")).filter(title_length=7)  # ok
 
 ## Model exceptions
 
-Every model has its own `DoesNotExist` exception, a subclass of `ObjectDoesNotExist`:
+Every model has its own `DoesNotExist` exception, a subclass of `ObjectDoesNotExist`, and its own
+`MultipleObjectsReturned` exception:
 
 ```py
+from django.core.exceptions import MultipleObjectsReturned, ObjectDoesNotExist
 from django.db import models
 
 class Book(models.Model):
     pass
 
-# TODO: Should be the `DoesNotExist` class of `Book`.
-reveal_type(Book.DoesNotExist)  # revealed: type[ObjectDoesNotExist]
+class Author(models.Model):
+    pass
+
+reveal_type(Book.DoesNotExist)  # revealed: <class 'DoesNotExist'>
+reveal_type(Book.MultipleObjectsReturned)  # revealed: <class 'MultipleObjectsReturned'>
+
+def _(book: Book):
+    reveal_type(book.DoesNotExist)  # revealed: <class 'DoesNotExist'>
+
+try:
+    Book.objects.get(pk=1)
+except Book.DoesNotExist as error:
+    reveal_type(error)  # revealed: DoesNotExist
+```
+
+The exceptions of different models are different classes:
+
+```py
+def _(not_found: Book.DoesNotExist, duplicate: Book.MultipleObjectsReturned):
+    error: ObjectDoesNotExist = not_found  # ok
+    other: Author.DoesNotExist = not_found  # error: [invalid-assignment]
+    base: MultipleObjectsReturned = duplicate  # ok
+```
+
+A model that inherits from a concrete model has exceptions that inherit from the parent's. An
+abstract model has no exceptions of its own:
+
+```py
+class Ebook(Book):
+    pass
+
+class Publication(models.Model):
+    class Meta:
+        abstract = True
+
+def _(not_found: Ebook.DoesNotExist):
+    error: Book.DoesNotExist = not_found  # ok
+
+reveal_type(Publication.DoesNotExist)  # revealed: type[ObjectDoesNotExist]
 ```
 
 ## Multi-table inheritance
