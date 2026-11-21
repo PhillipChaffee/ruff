@@ -2032,6 +2032,32 @@ impl<'db> Bindings<'db> {
                     }
 
                     Type::BoundMethod(bound_method)
+                        if bound_method
+                            .function(db)
+                            .is_some_and(|function| function.name(db) == "values_list") =>
+                    {
+                        // The matched arguments include the bound `self` argument.
+                        let call_arguments =
+                            call_arguments.with_self(Some(bound_method.self_instance(db)));
+                        if let Some((fields, _)) = overload.signature.parameters().variadic()
+                            && let Ok(None) = overload.parameter_type_by_name(db, "named", false)
+                            && let Ok(flat) = overload.parameter_type_by_name(db, "flat", false)
+                            && let Some(flat) = to_bool(&flat, false)
+                            && let Some(queryset) = django::values_list_return_type(
+                                db,
+                                env,
+                                overload.return_type(),
+                                overload
+                                    .arguments_for_parameter(&call_arguments, fields)
+                                    .map(|(_, ty)| ty),
+                                flat,
+                            )
+                        {
+                            overload.set_return_type(queryset);
+                        }
+                    }
+
+                    Type::BoundMethod(bound_method)
                         if let Type::PropertyInstance(property) =
                             bound_method.self_instance(db)
                             && let Some(function) = bound_method.function(db)
