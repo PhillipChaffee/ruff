@@ -11,6 +11,7 @@ use crate::place::{global_symbol, known_module_symbol, place_from_bindings};
 use crate::types::call::Binding;
 use crate::types::infer::nearest_enclosing_class;
 use crate::types::member::class_member;
+use crate::types::typed_dict::{TypedDictFieldBuilder, TypedDictType};
 use crate::types::{
     BindingContext, BoundTypeVarInstance, ClassBase, ClassType, GenericContext, KnownClass,
     Parameter, Parameters, SelfTypeVarOrigin, Signature, Specialization, StaticClassLiteral, Type,
@@ -790,15 +791,28 @@ pub(in crate::types) fn from_queryset_return_type<'db>(
     ))
 }
 
-/// Infer the row type of `QuerySet.values_list()` from the fields named in the call.
+/// The shape of the rows that a `QuerySet` method returns for the fields named in its call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::types) enum QuerySetRows {
+    /// `values("title")`: a dictionary keyed by field name.
+    Dict,
+    /// `values_list("title", "rating")`: a tuple with one element per field.
+    Tuple,
+    /// `values_list("title", flat=True)`: the value of the single field.
+    Flat,
+}
+
+/// Infer the row type of `QuerySet.values()` and `QuerySet.values_list()` from the fields named
+/// in the call.
 ///
-/// The stubs declare the rows as `Any`. When every field is named by a string literal, each row is
-/// a tuple of those fields' types, or a single field's type with `flat=True`:
+/// The stubs declare the rows as `dict[str, Any]` and `Any`. When every field is named by a
+/// string literal, the rows follow those fields' types:
 /// ```py
 /// class Article(models.Model):
 ///     title = models.CharField(max_length=100)
 ///     rating = models.IntegerField()
 ///
+/// Article.objects.values("title")  # rows are a `TypedDict` with a `title` key of type `str`
 /// Article.objects.values_list("title", "rating")  # rows are `tuple[str, int]`
 /// Article.objects.values_list("title", flat=True)  # rows are `str`
 /// ```
@@ -806,12 +820,12 @@ pub(in crate::types) fn from_queryset_return_type<'db>(
 /// Returns `None`, which keeps the declared type, for calls that this does not model: a call
 /// without fields, a field that is not a string literal, and a lookup that spans a relation such
 /// as `"author__name"`.
-pub(in crate::types) fn values_list_return_type<'db>(
+pub(in crate::types) fn queryset_rows_return_type<'db>(
     db: &'db dyn Db,
     env: &ProgramEnvironment<'db>,
     declared: Type<'db>,
     fields: impl IntoIterator<Item = Type<'db>>,
-    flat: bool,
+    rows: QuerySetRows,
 ) -> Option<Type<'db>> {
     let (queryset, specialization) = declared.nominal_class(db, env)?.static_class_literal(db)?;
     if !queryset.is_known(db, KnownClass::DjangoQuerySet) {
@@ -823,17 +837,27 @@ pub(in crate::types) fn values_list_return_type<'db>(
         .into_iter()
         .map(|field| {
             let name = field.as_string_literal()?.value(db);
-            model
+            let ty = model
                 .member(db, env, name)
                 .place
-                .ignore_possibly_undefined()
+                .ignore_possibly_undefined()?;
+            Some((Name::new(name), ty))
         })
         .collect::<Option<Vec<_>>>()?;
-    let row = match columns.as_slice() {
-        [] => return None,
-        [column] if flat => *column,
-        _ if flat => return None,
-        _ => Type::heterogeneous_tuple(db, env, columns),
+    let row = match (rows, columns.as_slice()) {
+        (_, []) => return None,
+        (QuerySetRows::Dict, _) => Type::TypedDict(TypedDictType::from_schema_items(
+            db,
+            columns
+                .into_iter()
+                .map(|(name, ty)| (name, TypedDictFieldBuilder::new(ty).required(true).build()))
+                .collect(),
+        )),
+        (QuerySetRows::Tuple, _) => {
+            Type::heterogeneous_tuple(db, env, columns.into_iter().map(|(_, ty)| ty))
+        }
+        (QuerySetRows::Flat, [(_, ty)]) => *ty,
+        (QuerySetRows::Flat, _) => return None,
     };
 
     Some(Type::instance(

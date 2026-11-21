@@ -929,7 +929,7 @@ Book.objects.delete()  # error: [missing-attribute]
 ## `values()` and `values_list()`
 
 `values()` returns each row as a dictionary, and `values_list()` returns it as a tuple, or as a
-single value with `flat=True`. The types should follow the named fields:
+single value with `flat=True`. The types follow the named fields:
 
 ```py
 from django.db import models
@@ -938,21 +938,27 @@ class Article(models.Model):
     title = models.CharField(max_length=100)
     rating = models.IntegerField()
 
-# TODO: Should be a `TypedDict` with a `title` key of type `str`.
-reveal_type(Article.objects.values("title").get())  # revealed: dict[str, Any]
+row = Article.objects.values("title").get()
+reveal_type(row)  # revealed: <TypedDict with items 'title'>
+reveal_type(row["title"])  # revealed: str
+row["rating"]  # error: [invalid-typed-dict-key]
 
 reveal_type(Article.objects.values_list("title", "rating").get())  # revealed: tuple[str, int]
 reveal_type(Article.objects.values_list("title", flat=True).get())  # revealed: str
 reveal_type(Article.objects.filter(rating=5).values_list("pk").get())  # revealed: tuple[int]
 ```
 
-The rows keep the declared type `Any` when a field is not named by a string literal, when a lookup
-spans a relation, and for named tuples:
+The rows keep their declared types when a field is not named by a string literal, when a lookup
+spans a relation, for expressions passed as keyword arguments, and for named tuples:
 
 ```py
+from django.db.models.functions import Length
+
 def _(field: str):
+    reveal_type(Article.objects.values(field).get())  # revealed: dict[str, Any]
     reveal_type(Article.objects.values_list(field).get())  # revealed: Any
 
+reveal_type(Article.objects.values("title", n=Length("title")).get())  # revealed: dict[str, Any]
 reveal_type(Article.objects.values_list("title__length").get())  # revealed: Any
 reveal_type(Article.objects.values_list("title", named=True).get())  # revealed: Any
 ```
