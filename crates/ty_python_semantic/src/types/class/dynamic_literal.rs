@@ -8,7 +8,7 @@ use crate::{
     place::{Place, PlaceAndQualifiers},
     types::{
         ClassBase, ClassLiteral, ClassType, DataclassParams, KnownClass, MemberLookupPolicy,
-        SubclassOfType, Type,
+        StaticClassLiteral, SubclassOfType, Type,
         class::{
             ClassMemberResult, ClassMetaclass, CodeGeneratorKind, DisjointBase,
             DynamicClassHeaderAnchor, DynamicClassScopeOffset, InstanceMemberResult, MroLookup,
@@ -108,6 +108,22 @@ pub enum DynamicClassAnchor<'db> {
         offset: DynamicClassScopeOffset,
         explicit_bases: Box<[Type<'db>]>,
     },
+
+    /// A class that a library creates at runtime for the class `owner`, without a call in the
+    /// source. For example, Django creates a `DoesNotExist` exception class for each model:
+    ///
+    /// ```python
+    /// class Book(models.Model): ...
+    ///
+    /// Book.DoesNotExist  # a subclass of `ObjectDoesNotExist`
+    /// ```
+    ///
+    /// The class is identified by its `owner` and its name, and its header is the header of the
+    /// `owner` class. The `explicit_bases` are known when the class is created.
+    Implicit {
+        owner: StaticClassLiteral<'db>,
+        explicit_bases: Box<[Type<'db>]>,
+    },
 }
 
 impl<'db> DynamicClassAnchor<'db> {
@@ -143,6 +159,27 @@ impl<'db> DynamicClassAnchor<'db> {
                     explicit_bases,
                 })
             }
+            Self::Implicit {
+                owner,
+                explicit_bases,
+            } => {
+                let explicit_bases = explicit_bases
+                    .iter()
+                    .map(|base| {
+                        let base = base.recursive_type_normalized_impl(db, env, div, true);
+                        if nested {
+                            base
+                        } else {
+                            Some(base.unwrap_or(div))
+                        }
+                    })
+                    .collect::<Option<Box<_>>>()?;
+
+                Some(Self::Implicit {
+                    owner: *owner,
+                    explicit_bases,
+                })
+            }
         }
     }
 }
@@ -169,7 +206,7 @@ impl<'db> DynamicClassLiteral<'db> {
     pub(crate) fn definition(self, db: &'db dyn Db) -> Option<Definition<'db>> {
         match self.anchor(db) {
             DynamicClassAnchor::Definition(definition) => Some(*definition),
-            DynamicClassAnchor::ScopeOffset { .. } => None,
+            DynamicClassAnchor::ScopeOffset { .. } | DynamicClassAnchor::Implicit { .. } => None,
         }
     }
 
@@ -178,6 +215,7 @@ impl<'db> DynamicClassLiteral<'db> {
         match self.anchor(db) {
             DynamicClassAnchor::Definition(definition) => definition.scope(db),
             DynamicClassAnchor::ScopeOffset { scope, .. } => *scope,
+            DynamicClassAnchor::Implicit { owner, .. } => owner.body_scope(db),
         }
     }
 
@@ -228,7 +266,8 @@ impl<'db> DynamicClassLiteral<'db> {
 
         match self.anchor(db) {
             // For dangling calls, bases are stored directly on the anchor.
-            DynamicClassAnchor::ScopeOffset { explicit_bases, .. } => explicit_bases.as_ref(),
+            DynamicClassAnchor::ScopeOffset { explicit_bases, .. }
+            | DynamicClassAnchor::Implicit { explicit_bases, .. } => explicit_bases.as_ref(),
             // For assigned calls, use deferred inference.
             DynamicClassAnchor::Definition(definition) => deferred_explicit_bases(db, *definition),
         }
@@ -250,6 +289,7 @@ impl<'db> DynamicClassLiteral<'db> {
             DynamicClassAnchor::ScopeOffset { offset, .. } => {
                 DynamicClassHeaderAnchor::ScopeOffset(*offset)
             }
+            DynamicClassAnchor::Implicit { owner, .. } => return owner.header_range(db),
         };
         dynamic_class_header_range(db, self.scope(db), anchor)
     }

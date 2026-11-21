@@ -14,6 +14,7 @@ use ty_python_core::{
 
 use crate::place::{global_symbol, known_module_symbol, place_from_bindings};
 use crate::types::call::Binding;
+use crate::types::class::{ClassLiteral, DynamicClassAnchor, DynamicClassLiteral};
 use crate::types::infer::nearest_enclosing_class;
 use crate::types::member::class_member;
 use crate::types::typed_dict::{TypedDictFieldBuilder, TypedDictType};
@@ -329,8 +330,10 @@ pub(in crate::types) fn synthesized_member<'db>(
     }
     // A quick filter on the name of the members that depend on the fields of the model. A reverse
     // accessor can have any name.
-    if !(matches!(name, "id" | "pk")
-        || name.ends_with("_id")
+    if !(matches!(
+        name,
+        "id" | "pk" | "DoesNotExist" | "MultipleObjectsReturned"
+    ) || name.ends_with("_id")
         || name.ends_with("_ptr")
         || name.starts_with("get_") && name.ends_with("_display")
         || name.starts_with("get_next_by_")
@@ -340,6 +343,7 @@ pub(in crate::types) fn synthesized_member<'db>(
             .or_else(|| reverse_accessor(db, class, name));
     }
     match name {
+        "DoesNotExist" | "MultipleObjectsReturned" => model_exception(db, env, class, name),
         "id" | "pk" => match primary_key_member(db, env, class, specialization, name)? {
             PrimaryKeyMember::Automatic(ty) | PrimaryKeyMember::Explicit(ty) => Some(ty),
         },
@@ -518,6 +522,74 @@ fn setting<'db>(
     known_module_symbol(db, env, KnownModule::DjangoConfGlobalSettings, name)
         .place
         .ignore_possibly_undefined()
+}
+
+/// Synthesize the `DoesNotExist` and `MultipleObjectsReturned` exception classes of a model.
+///
+/// Django creates both classes for every model that is not abstract. They inherit from the
+/// exceptions of the model's concrete parents, or from `ObjectDoesNotExist` and
+/// `MultipleObjectsReturned` in `django.core.exceptions` for a model without one:
+/// ```py
+/// class Book(models.Model): ...
+/// class Ebook(Book): ...
+///
+/// # Ebook.DoesNotExist is a subclass of Book.DoesNotExist, which is a subclass of
+/// # ObjectDoesNotExist.
+/// ```
+///
+/// The stubs declare the attributes on `Model` as `type[ObjectDoesNotExist]`. With a class for
+/// each model, `except Book.DoesNotExist` does not also catch the exception of another model.
+fn model_exception<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+    class: StaticClassLiteral<'db>,
+    name: &str,
+) -> Option<Type<'db>> {
+    if model_metadata(db, class).is_abstract {
+        return None;
+    }
+
+    let parent_exceptions: Box<[Type<'db>]> = class
+        .explicit_bases(db)
+        .iter()
+        .filter(|base| {
+            base.to_class_type(db)
+                .and_then(|base| base.static_class_literal(db))
+                .is_some_and(|(base, _)| {
+                    is_model(db, base) && !model_metadata(db, base).is_abstract
+                })
+        })
+        .map(|base| base.member(db, env, name).place.ignore_possibly_undefined())
+        .collect::<Option<_>>()?;
+    let explicit_bases = if parent_exceptions.is_empty() {
+        // The declaration on `Model` names the exception that the classes of a model without a
+        // concrete parent inherit from.
+        let Type::SubclassOf(declared) = KnownClass::DjangoModel
+            .to_class_literal(db, env)
+            .member(db, env, name)
+            .place
+            .ignore_possibly_undefined()?
+        else {
+            return None;
+        };
+        Box::new([Type::from(declared.subclass_of().into_class(db, env)?)])
+    } else {
+        parent_exceptions
+    };
+
+    Some(Type::ClassLiteral(ClassLiteral::Dynamic(
+        DynamicClassLiteral::new(
+            db,
+            Name::new(name),
+            DynamicClassAnchor::Implicit {
+                owner: class,
+                explicit_bases,
+            },
+            Box::default(),
+            false,
+            None,
+        ),
+    )))
 }
 
 /// Synthesize the attribute of a field whose `name` argument differs from the name it is assigned
