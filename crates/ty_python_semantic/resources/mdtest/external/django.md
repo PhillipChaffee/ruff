@@ -589,4 +589,238 @@ def _(book1: Book1, book2: Book2):
     reveal_type(book2.title)  # revealed: str
 ```
 
+## Multi-table inheritance
+
+### Parent link
+
+A model that inherits from a concrete model gets its own database table. Django adds a
+`<parent>_ptr` field to the child, a `OneToOneField` that links to the parent model, where
+`<parent>` is the lowercase name of the parent model. The `<parent>_ptr_id` attribute contains the
+parent's primary-key value.
+
+```py
+from django.db import models
+
+class Book(models.Model):
+    title = models.CharField(max_length=200)
+
+class AudioBook(Book):
+    minutes = models.IntegerField()
+
+def _(book: Book, audio_book: AudioBook):
+    reveal_type(audio_book.book_ptr)  # revealed: Book
+    reveal_type(audio_book.book_ptr_id)  # revealed: int
+
+    # The parent model has no link to itself, and the name must match the parent model.
+    book.book_ptr  # error: [missing-attribute]
+    audio_book.author_ptr  # error: [missing-attribute]
+    audio_book.audio_book_ptr  # error: [missing-attribute]
+```
+
+A model inherits the parent links of its parent.
+
+```py
+class AbridgedAudioBook(AudioBook):
+    pass
+
+def _(abridged: AbridgedAudioBook):
+    reveal_type(abridged.audiobook_ptr)  # revealed: AudioBook
+    reveal_type(abridged.audiobook_ptr_id)  # revealed: int
+    reveal_type(abridged.book_ptr)  # revealed: Book
+    reveal_type(abridged.book_ptr_id)  # revealed: int
+```
+
+### Custom primary key
+
+The type of `<parent>_ptr_id` follows the parent model's primary key.
+
+```py
+from django.db import models
+
+class Book(models.Model):
+    isbn = models.CharField(max_length=13, primary_key=True)
+
+class Ebook(Book):
+    pass
+
+def _(ebook: Ebook):
+    reveal_type(ebook.book_ptr)  # revealed: Book
+    reveal_type(ebook.book_ptr_id)  # revealed: str
+```
+
+### Multiple parents
+
+A model with several concrete parents has a parent link for each of them.
+
+```py
+from django.db import models
+
+class Book(models.Model):
+    isbn = models.CharField(max_length=13, primary_key=True)
+
+class Product(models.Model):
+    price = models.IntegerField()
+
+class BookProduct(Product, Book):
+    pass
+
+def _(book_product: BookProduct):
+    reveal_type(book_product.product_ptr)  # revealed: Product
+    reveal_type(book_product.product_ptr_id)  # revealed: int
+    reveal_type(book_product.book_ptr)  # revealed: Book
+    reveal_type(book_product.book_ptr_id)  # revealed: str
+```
+
+### Abstract parents
+
+An abstract model has no database table, so Django does not add a parent link for it.
+
+```py
+from django.db import models
+
+class AbstractBook(models.Model):
+    title = models.CharField(max_length=200)
+
+    class Meta:
+        abstract = True
+
+class Book(AbstractBook):
+    pass
+
+def _(book: Book):
+    book.abstractbook_ptr  # error: [missing-attribute]
+```
+
+An abstract model that inherits from a concrete model passes the parent link on to its children.
+
+```py
+class AbstractEbook(Book):
+    class Meta:
+        abstract = True
+
+class Ebook(AbstractEbook):
+    pass
+
+def _(ebook: Ebook):
+    reveal_type(ebook.book_ptr)  # revealed: Book
+    reveal_type(ebook.book_ptr_id)  # revealed: int
+    ebook.abstractebook_ptr  # error: [missing-attribute]
+```
+
+### Proxy models
+
+A proxy model uses the database table of its parent, so Django does not add a parent link for it.
+
+```py
+from django.db import models
+
+class Book(models.Model):
+    title = models.CharField(max_length=200)
+
+class BookProxy(Book):
+    class Meta:
+        proxy = True
+
+def _(proxy: BookProxy):
+    proxy.book_ptr  # error: [missing-attribute]
+    proxy.book_ptr_id  # error: [missing-attribute]
+```
+
+A concrete child of a proxy model links to the proxy's concrete parent.
+
+```py
+class Ebook(BookProxy):
+    pass
+
+def _(ebook: Ebook):
+    reveal_type(ebook.book_ptr)  # revealed: Book
+    ebook.bookproxy_ptr  # error: [missing-attribute]
+```
+
+A proxy model inherits the parent links of its parent.
+
+```py
+class EbookProxy(Ebook):
+    class Meta:
+        proxy = True
+
+def _(proxy: EbookProxy):
+    reveal_type(proxy.book_ptr)  # revealed: Book
+    proxy.ebook_ptr  # error: [missing-attribute]
+```
+
+Configuration inherited from an ordinary class retains its `proxy` setting.
+
+```py
+class Options:
+    proxy = True
+
+class InheritedProxy(Book):
+    class Meta(Options):
+        pass
+
+def _(proxy: InheritedProxy):
+    proxy.book_ptr  # error: [missing-attribute]
+```
+
+### Explicit parent link
+
+A `OneToOneField` declared with `parent_link=True` replaces the automatic `<parent>_ptr` field.
+
+```py
+from django.db import models
+
+class Book(models.Model):
+    title = models.CharField(max_length=200)
+
+class Ebook(Book):
+    book = models.OneToOneField(Book, on_delete=models.CASCADE, parent_link=True, primary_key=True)
+
+def _(ebook: Ebook):
+    reveal_type(ebook.book)  # revealed: Book
+    reveal_type(ebook.book_id)  # revealed: int
+    ebook.book_ptr  # error: [missing-attribute]
+    ebook.book_ptr_id  # error: [missing-attribute]
+```
+
+Children inherit the explicit parent link instead of an automatic one.
+
+```py
+class PdfEbook(Ebook):
+    pass
+
+def _(pdf_ebook: PdfEbook):
+    reveal_type(pdf_ebook.ebook_ptr)  # revealed: Ebook
+    reveal_type(pdf_ebook.book)  # revealed: Book
+    pdf_ebook.book_ptr  # error: [missing-attribute]
+```
+
+An explicit parent link only replaces the automatic field for the model that it relates to.
+
+```py
+class SignedPdfEbook(PdfEbook):
+    pdf = models.OneToOneField(PdfEbook, on_delete=models.CASCADE, parent_link=True, primary_key=True)
+
+def _(signed: SignedPdfEbook):
+    reveal_type(signed.pdf)  # revealed: PdfEbook
+    reveal_type(signed.ebook_ptr)  # revealed: Ebook
+    signed.pdfebook_ptr  # error: [missing-attribute]
+```
+
+A model with several concrete parents keeps the automatic parent links to the other parents.
+
+```py
+class Product(models.Model):
+    price = models.IntegerField()
+
+class BookProduct(Product, Book):
+    book = models.OneToOneField(Book, on_delete=models.CASCADE, parent_link=True)
+
+def _(book_product: BookProduct):
+    reveal_type(book_product.book)  # revealed: Book
+    book_product.book_ptr  # error: [missing-attribute]
+    # TODO: Should not be an error, and the type should be `Product`.
+    book_product.product_ptr  # error: [missing-attribute]
+```
+
 [django-types]: https://github.com/sbdchd/django-types
