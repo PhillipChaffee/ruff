@@ -412,6 +412,16 @@ def _(book: Book, author: Author):
     reveal_type(author.mentor)  # revealed: Any | None
 ```
 
+The type of `<field>_id` should follow the primary key of the related model:
+
+```py
+def _(book: Book):
+    # TODO: Should be `int`.
+    reveal_type(book.author_id)  # revealed: Any
+    # TODO: Should be `int | None`.
+    reveal_type(book.editor_id)  # revealed: Any | None
+```
+
 ## Choices
 
 The `choices` parameter can be used to map the actual stored values for a field to human-readable
@@ -642,6 +652,190 @@ def _(book1: Book1, book2: Book2):
     reveal_type(book2.id)  # revealed: UUID
     reveal_type(book2.pk)  # revealed: UUID
     reveal_type(book2.title)  # revealed: str
+```
+
+## Reverse accessors
+
+A `OneToOneField` adds a reverse accessor that returns the single related instance. Its default name
+is the lowercase source model name, without `_set`:
+
+```py
+from django.db import models
+
+class Author(models.Model):
+    pass
+
+class Profile(models.Model):
+    author = models.OneToOneField(Author, on_delete=models.CASCADE)
+
+def _(author: Author):
+    # TODO: Should not be an error, and the type should be `Profile`.
+    # error: [missing-attribute]
+    reveal_type(author.profile)  # revealed: Unknown
+```
+
+A `related_name` on an abstract model can contain `%(class)s`, which Django replaces with the
+lowercase name of each concrete subclass:
+
+```py
+class Publication(models.Model):
+    author = models.ForeignKey(Author, on_delete=models.CASCADE, related_name="%(class)ss")
+
+    class Meta:
+        abstract = True
+
+class Book(Publication):
+    pass
+
+def _(author: Author):
+    # TODO: Should not be an error, and the type should be `QuerySet[Book]`.
+    # error: [missing-attribute]
+    reveal_type(author.books.all())  # revealed: Unknown
+```
+
+## User model
+
+`get_user_model()` returns the model named by the `AUTH_USER_MODEL` setting, which is
+`django.contrib.auth.models.User` by default. django-stubs declares the return type as
+`type[AbstractBaseUser]`, so the result cannot be used as a type, and the attributes that `User`
+adds are missing:
+
+```py
+from django.contrib.auth import get_user_model
+from django.http import HttpRequest
+
+User = get_user_model()
+
+# TODO: Should not be an error.
+# error: [invalid-type-form]
+def _(user: User):
+    # TODO: Should be `User`.
+    reveal_type(user)  # revealed: Unknown
+
+# TODO: Should not be an error, and the type should be `User`.
+# error: [missing-attribute]
+reveal_type(User.objects.create_user("alice"))  # revealed: Unknown
+
+def _(request: HttpRequest):
+    # TODO: Should be `User | AnonymousUser`.
+    reveal_type(request.user)  # revealed: AbstractBaseUser | AnonymousUser
+
+    # TODO: Should not be an error.
+    # error: [missing-union-attribute]
+    request.user.is_superuser
+```
+
+## Primary key of an abstract model's subclasses
+
+An abstract model cannot be instantiated, so a value annotated with an abstract model is always an
+instance of a concrete subclass, which has a primary key:
+
+```py
+from django.db import models
+
+class Publication(models.Model):
+    class Meta:
+        abstract = True
+
+class Book(Publication):
+    pass
+
+def _(publication: Publication):
+    # TODO: Should follow the primary key of the concrete subclasses.
+    reveal_type(publication.pk)  # revealed: Any
+
+    # TODO: Should not be an error when every concrete subclass has an `id` field.
+    publication.id  # error: [missing-attribute]
+```
+
+## Choices classes
+
+The `choices` parameter accepts a subclass of Django's `Choices`, such as `TextChoices`:
+
+```py
+from django.db import models
+
+class Status(models.TextChoices):
+    DRAFT = "D", "Draft"
+    PUBLISHED = "P", "Published"
+
+class Article(models.Model):
+    # TODO: Should not be an error.
+    # error: [invalid-argument-type]
+    status = models.CharField(max_length=1, choices=Status, default=Status.DRAFT)
+
+def _(article: Article):
+    reveal_type(article.status)  # revealed: str
+    reveal_type(article.get_status_display())  # revealed: str
+```
+
+## Custom `QuerySet` methods on managers
+
+`QuerySet.as_manager()` and `Manager.from_queryset()` create a manager that has a copy of the custom
+`QuerySet`'s methods:
+
+```py
+from django.db import models
+
+class ArticleQuerySet(models.QuerySet["Article"]):
+    def published(self) -> "ArticleQuerySet":
+        return self.filter(published=True)
+
+class Article(models.Model):
+    published = models.BooleanField(default=False)
+
+    objects = ArticleQuerySet.as_manager()
+    reviewed = models.Manager.from_queryset(ArticleQuerySet)()
+
+reveal_type(Article.objects.all().published())  # revealed: ArticleQuerySet
+
+# TODO: Should not be an error, and the type should be `ArticleQuerySet`.
+# error: [missing-attribute]
+reveal_type(Article.objects.published())  # revealed: Unknown
+
+# TODO: Should not be an error, and the type should be `ArticleQuerySet`.
+# error: [missing-attribute]
+reveal_type(Article.reviewed.published())  # revealed: Unknown
+```
+
+## `values()` and `values_list()`
+
+`values()` returns each row as a dictionary, and `values_list()` returns it as a tuple, or as a
+single value with `flat=True`. The types should follow the named fields:
+
+```py
+from django.db import models
+
+class Article(models.Model):
+    title = models.CharField(max_length=100)
+    rating = models.IntegerField()
+
+# TODO: Should be a `TypedDict` with a `title` key of type `str`.
+reveal_type(Article.objects.values("title").get())  # revealed: dict[str, Any]
+
+# TODO: Should be `tuple[str, int]`.
+reveal_type(Article.objects.values_list("title", "rating").get())  # revealed: Any
+
+# TODO: Should be `str`.
+reveal_type(Article.objects.values_list("title", flat=True).get())  # revealed: Any
+```
+
+## Annotations
+
+`annotate()` adds an attribute to each instance in the `QuerySet` for every keyword argument:
+
+```py
+from django.db import models
+from django.db.models.functions import Length
+
+class Article(models.Model):
+    title = models.CharField(max_length=100)
+
+article = Article.objects.annotate(title_length=Length("title")).get()
+
+# TODO: Should not be an error, and the type should be `int`.
+# error: [missing-attribute]
+reveal_type(article.title_length)  # revealed: Unknown
 ```
 
 [django-stubs]: https://github.com/typeddjango/django-stubs
