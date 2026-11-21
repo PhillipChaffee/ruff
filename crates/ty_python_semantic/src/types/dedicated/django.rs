@@ -11,9 +11,9 @@ use crate::types::call::Binding;
 use crate::types::infer::nearest_enclosing_class;
 use crate::types::member::class_member;
 use crate::types::{
-    BindingContext, BoundTypeVarInstance, ClassBase, GenericContext, KnownClass, Parameter,
-    Parameters, SelfTypeVarOrigin, Signature, Specialization, StaticClassLiteral, Type, UnionType,
-    binding_type, definition_expression_type,
+    BindingContext, BoundTypeVarInstance, ClassBase, ClassType, GenericContext, KnownClass,
+    Parameter, Parameters, SelfTypeVarOrigin, Signature, Specialization, StaticClassLiteral, Type,
+    UnionType, binding_type, definition_expression_type,
 };
 use crate::{Db, ProgramEnvironment};
 
@@ -117,17 +117,26 @@ impl<'db> Field<'db> {
                     .as_string_literal()
                     .map(|name| Name::new(name.value(db)))
             });
+        field.metadata.parent_link =
+            call.arguments
+                .find_keyword("parent_link")
+                .is_some_and(|parent_link| {
+                    definition_expression_type(db, definition, &parent_link.value).as_bool_literal()
+                        == Some(true)
+                });
         field
     }
 }
 
 /// Metadata extracted from a Django field's construction.
 #[derive(Debug, Clone, Default, PartialEq, Eq, get_size2::GetSize, salsa::SalsaValue)]
+#[expect(clippy::struct_excessive_bools)]
 struct FieldMetadata {
     primary_key: bool,
     has_choices: bool,
     null: bool,
     to_field: Option<Name>,
+    parent_link: bool,
 }
 
 /// All fields defined on this Django model (not including base class fields).
@@ -171,6 +180,7 @@ fn own_model_fields<'db>(db: &'db dyn Db, class: StaticClassLiteral<'db>) -> Box
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, get_size2::GetSize, salsa::SalsaValue)]
 struct ModelMetadata {
     is_abstract: bool,
+    is_proxy: bool,
 }
 
 #[salsa::tracked(returns(copy), heap_size=ruff_memory_usage::heap_size)]
@@ -180,10 +190,28 @@ fn model_metadata<'db>(db: &'db dyn Db, class: StaticClassLiteral<'db>) -> Model
     let Some(meta) = own_meta(db, class) else {
         return ModelMetadata::default();
     };
+    ModelMetadata {
+        is_abstract: is_abstract(db, &env, class, meta),
+        // Unlike `abstract`, Django never resets `proxy`.
+        is_proxy: meta
+            .iter_mro(db, None)
+            .filter_map(ClassBase::into_class)
+            .map_while(|meta_base| meta_base.static_class_literal(db))
+            .find_map(|(meta_base, _)| meta_setting(db, &env, meta_base, "proxy"))
+            .unwrap_or(false),
+    }
+}
 
+/// Returns whether `meta`, the `Meta` configuration of the model `class`, makes it abstract.
+fn is_abstract<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+    class: StaticClassLiteral<'db>,
+    meta: StaticClassLiteral<'db>,
+) -> bool {
     for meta_base in meta.iter_mro(db, None).filter_map(ClassBase::into_class) {
         let Some((meta_base, _)) = meta_base.static_class_literal(db) else {
-            return ModelMetadata::default();
+            return false;
         };
         // Django resets an abstract model's Meta.abstract to False during model creation.
         // A child can inherit other options from that Meta, but must set abstract=True itself.
@@ -196,28 +224,35 @@ fn model_metadata<'db>(db: &'db dyn Db, class: StaticClassLiteral<'db>) -> Model
             && is_model(db, owner)
             && own_meta(db, owner) == Some(meta_base)
         {
-            return ModelMetadata::default();
+            return false;
         }
 
-        let scope = meta_base.body_scope(db);
-        let Some(symbol) = place_table(db, scope).symbol_id("abstract") else {
-            continue;
-        };
-        // The public type is widened to `bool`, so read the bindings' literal values instead.
-        let Some(abstract_flag) = place_from_bindings(
-            db,
-            &env,
-            use_def_map(db, scope).end_of_scope_symbol_bindings(symbol),
-        )
-        .place
-        .ignore_possibly_undefined() else {
-            continue;
-        };
-        return ModelMetadata {
-            is_abstract: abstract_flag == Type::bool_literal(true),
-        };
+        if let Some(is_abstract) = meta_setting(db, env, meta_base, "abstract") {
+            return is_abstract;
+        }
     }
-    ModelMetadata::default()
+    false
+}
+
+/// Returns whether the body of the `Meta` class `meta` sets `name` to `True`, or `None` if it has
+/// no such setting.
+fn meta_setting<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+    meta: StaticClassLiteral<'db>,
+    name: &str,
+) -> Option<bool> {
+    let scope = meta.body_scope(db);
+    let symbol = place_table(db, scope).symbol_id(name)?;
+    // The public type is widened to `bool`, so read the bindings' literal values instead.
+    let value = place_from_bindings(
+        db,
+        env,
+        use_def_map(db, scope).end_of_scope_symbol_bindings(symbol),
+    )
+    .place
+    .ignore_possibly_undefined()?;
+    Some(value == Type::bool_literal(true))
 }
 
 fn own_meta<'db>(
@@ -247,6 +282,7 @@ pub(in crate::types) fn synthesized_member<'db>(
     // A quick filter on the name, so that we can return quickly for almost all attribute names.
     if !(matches!(name, "id" | "pk")
         || name.ends_with("_id")
+        || name.ends_with("_ptr")
         || name.starts_with("get_") && name.ends_with("_display")
         || name.starts_with("get_next_by_")
         || name.starts_with("get_previous_by_"))
@@ -260,7 +296,8 @@ pub(in crate::types) fn synthesized_member<'db>(
         "id" | "pk" => primary_key_member(db, env, class, specialization, name),
         _ => display_method(db, env, class, specialization, name)
             .or_else(|| date_navigation_method(db, env, class, specialization, name))
-            .or_else(|| foreign_key_id_member(db, env, class, specialization, name)),
+            .or_else(|| foreign_key_id_member(db, env, class, specialization, name))
+            .or_else(|| parent_link_member(db, env, class, specialization, name)),
     }
 }
 
@@ -469,6 +506,78 @@ fn foreign_key_id_type<'db>(
     } else {
         id_ty
     })
+}
+
+/// Synthesize `<parent>_ptr` and `<parent>_ptr_id` attributes for multi-table inheritance.
+///
+/// A model that inherits from a concrete model links to it through an automatic `OneToOneField`
+/// named after the parent model. For example, `Ebook().book_ptr` has type `Book`, and
+/// `Ebook().book_ptr_id` has type `int`, matching `Book`'s automatic primary key:
+/// ```py
+/// class Book(models.Model):
+///     pass
+///
+/// class Ebook(Book):
+///     pass
+/// ```
+///
+/// This only covers the links from `class` to its direct bases. Subclasses of `class` find them
+/// through the regular attribute lookup on their base classes.
+fn parent_link_member<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+    class: StaticClassLiteral<'db>,
+    specialization: Option<Specialization<'db>>,
+    name: &str,
+) -> Option<Type<'db>> {
+    let (parent_name, is_id) = match name.strip_suffix("_ptr_id") {
+        Some(parent_name) => (parent_name, true),
+        None => (name.strip_suffix("_ptr")?, false),
+    };
+
+    // A proxy model uses the database table of its parent, so there is nothing to link.
+    // A field declared with `parent_link=True` replaces an automatic one. We do not know which
+    // parent it replaces if the model has several, so we do not synthesize any.
+    if model_metadata(db, class).is_proxy
+        || own_model_fields(db, class)
+            .iter()
+            .any(|field| field.metadata.parent_link)
+    {
+        return None;
+    }
+
+    let parent = class
+        .explicit_bases(db)
+        .iter()
+        .filter_map(|base| concrete_model(db, base.to_class_type(db)?))
+        .find(|parent| parent.name(db).to_lowercase() == parent_name)?;
+    let parent_ty =
+        Type::instance(db, env, parent).apply_optional_specialization(db, specialization);
+
+    if is_id {
+        parent_ty
+            .member(db, env, "pk")
+            .place
+            .ignore_possibly_undefined()
+    } else {
+        Some(parent_ty)
+    }
+}
+
+/// Returns the model whose database table stores the rows of `model`: a concrete model itself, or
+/// the nearest concrete parent of a proxy model. Abstract models have no database table.
+fn concrete_model<'db>(db: &'db dyn Db, model: ClassType<'db>) -> Option<ClassType<'db>> {
+    let metadata = |class: ClassType<'db>| {
+        let (class, _) = class.static_class_literal(db)?;
+        is_model(db, class).then(|| model_metadata(db, class))
+    };
+    if metadata(model)?.is_abstract {
+        return None;
+    }
+    model
+        .iter_mro(db)
+        .filter_map(ClassBase::into_class)
+        .find(|base| metadata(*base).is_some_and(|base| !base.is_abstract && !base.is_proxy))
 }
 
 /// Synthesize `get_<field>_display()` for fields with `choices` defined.
