@@ -2032,25 +2032,42 @@ impl<'db> Bindings<'db> {
                     }
 
                     Type::BoundMethod(bound_method)
-                        if bound_method
-                            .function(db)
-                            .is_some_and(|function| function.name(db) == "values_list") =>
+                        if let Some(function) = bound_method.function(db)
+                            && matches!(function.name(db).as_str(), "values" | "values_list") =>
                     {
                         // The matched arguments include the bound `self` argument.
                         let call_arguments =
                             call_arguments.with_self(Some(bound_method.self_instance(db)));
-                        if let Some((fields, _)) = overload.signature.parameters().variadic()
-                            && let Ok(None) = overload.parameter_type_by_name(db, "named", false)
+                        let parameters = overload.signature.parameters();
+                        let rows = if let Some((expressions, _)) = parameters.keyword_variadic() {
+                            overload
+                                .arguments_for_parameter(&call_arguments, expressions)
+                                .next()
+                                .is_none()
+                                .then_some(django::QuerySetRows::Dict)
+                        } else if let Ok(None) = overload.parameter_type_by_name(db, "named", false)
                             && let Ok(flat) = overload.parameter_type_by_name(db, "flat", false)
-                            && let Some(flat) = to_bool(&flat, false)
-                            && let Some(queryset) = django::values_list_return_type(
+                        {
+                            to_bool(&flat, false).map(|flat| {
+                                if flat {
+                                    django::QuerySetRows::Flat
+                                } else {
+                                    django::QuerySetRows::Tuple
+                                }
+                            })
+                        } else {
+                            None
+                        };
+                        if let Some(rows) = rows
+                            && let Some((fields, _)) = parameters.variadic()
+                            && let Some(queryset) = django::queryset_rows_return_type(
                                 db,
                                 env,
                                 overload.return_type(),
                                 overload
                                     .arguments_for_parameter(&call_arguments, fields)
                                     .map(|(_, ty)| ty),
-                                flat,
+                                rows,
                             )
                         {
                             overload.set_return_type(queryset);
