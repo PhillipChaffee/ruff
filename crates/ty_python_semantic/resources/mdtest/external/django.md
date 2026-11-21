@@ -1207,11 +1207,33 @@ class Book(models.Model):
     tags = models.ManyToManyField(Tag)
 
 def _(book: Book):
-    reveal_type(book.tags)  # revealed: ManyRelatedManager[Tag, Any]
+    reveal_type(book.tags)  # revealed: ManyRelatedManager[Tag, Book_tags]
     reveal_type(book.tags.all())  # revealed: QuerySet[Tag, Tag]
 
-# TODO: Should be the automatically created `Book_tags` model.
-reveal_type(Book.tags.through)  # revealed: type[Any]
+reveal_type(Book.tags.through)  # revealed: type[Book_tags]
+```
+
+The automatically created model has a foreign key to each of the two models:
+
+```py
+def _(book: Book):
+    tagging = book.tags.through.objects.get()
+    reveal_type(tagging.book)  # revealed: Book
+    reveal_type(tagging.tag)  # revealed: Tag
+    reveal_type(tagging.tag_id)  # revealed: int
+    reveal_type(tagging.pk)  # revealed: int
+```
+
+For a relation from a model to itself, the foreign keys are named `from_<model>` and `to_<model>`:
+
+```py
+class Person(models.Model):
+    friends = models.ManyToManyField("self")
+
+def _(person: Person):
+    friendship = person.friends.through.objects.get()
+    reveal_type(friendship.from_person)  # revealed: Person
+    reveal_type(friendship.to_person)  # revealed: Person
 ```
 
 The related model and the model of the intermediate table can be given as a class or as the name of
