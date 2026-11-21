@@ -1661,7 +1661,12 @@ fn refined_many_to_many_type<'db>(
         }
     };
     let refined_to = resolve(to, field.to);
-    let refined_through = resolve(through, field.through);
+    let refined_through = match field.through {
+        None if through.is_dynamic() => {
+            automatic_through_model(db, env, class, field, refined_to.unwrap_or(to))
+        }
+        reference => resolve(through, reference),
+    };
     if refined_to.is_none() && refined_through.is_none() {
         return None;
     }
@@ -1674,6 +1679,76 @@ fn refined_many_to_many_type<'db>(
                 vec![refined_to.unwrap_or(to), refined_through.unwrap_or(through)],
             )
         }),
+    ))
+}
+
+/// Return the model of the intermediate table that Django creates for the `ManyToManyField`
+/// `field` of the model `class` without a `through` argument. `to` is the related model.
+///
+/// The model is named after the model and the field, and has a foreign key to each of the two
+/// models, named after them:
+/// ```py
+/// class Book(models.Model):
+///     tags = models.ManyToManyField(Tag)
+///
+/// # Book.tags.through is the model `Book_tags`, with the foreign keys `book` and `tag`.
+/// ```
+///
+/// For a relation from a model to itself, the foreign keys are named `from_<model>` and
+/// `to_<model>`. The model has the attributes of the foreign keys and of the primary key, with
+/// the types that they have on an instance.
+fn automatic_through_model<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+    class: StaticClassLiteral<'db>,
+    field: &Field<'db>,
+    to: Type<'db>,
+) -> Option<Type<'db>> {
+    // A field of an abstract model creates a separate model for each concrete subclass.
+    if model_metadata(db, class).is_abstract {
+        return None;
+    }
+    let (to_class, _) = to.nominal_class(db, env)?.static_class_literal(db)?;
+    let source = Type::instance(db, env, class.default_specialization(db));
+    let primary_key = |model: Type<'db>| {
+        model
+            .member(db, env, "pk")
+            .place
+            .ignore_possibly_undefined()
+    };
+
+    let source_name = class.name(db).to_lowercase();
+    let to_name = to_class.name(db).to_lowercase();
+    let (source_name, to_name) = if source_name == to_name {
+        (format!("from_{source_name}"), format!("to_{to_name}"))
+    } else {
+        (source_name, to_name)
+    };
+    let id = KnownClass::Int.to_instance(db, env);
+    let members: Box<[(Name, Type<'db>)]> = Box::new([
+        (Name::new_static("id"), id),
+        (Name::new_static("pk"), id),
+        (Name::new(format!("{source_name}_id")), primary_key(source)?),
+        (Name::new(format!("{to_name}_id")), primary_key(to)?),
+        (Name::new(source_name), source),
+        (Name::new(to_name), to),
+    ]);
+
+    let through = DynamicClassLiteral::new(
+        db,
+        Name::new(format!("{}_{}", class.name(db), field.name)),
+        DynamicClassAnchor::Implicit {
+            owner: class,
+            explicit_bases: Box::new([KnownClass::DjangoModel.to_class_literal(db, env)]),
+        },
+        members,
+        false,
+        None,
+    );
+    Some(Type::instance(
+        db,
+        env,
+        ClassLiteral::Dynamic(through).default_specialization(db),
     ))
 }
 
