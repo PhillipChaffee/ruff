@@ -125,8 +125,7 @@ article.view_count = 2  # ok
 article.view_count = None  # error: [invalid-assignment]
 
 # The original field name is not available as an attribute.
-# TODO: Should be an missing-attribute error.
-article.views
+article.views  # error: [missing-attribute]
 
 # This is correct:
 Article(view_count=1)
@@ -1003,6 +1002,27 @@ def _(book: Book):
 
 # TODO: Should be the automatically created `Book_tags` model.
 reveal_type(Book.tags.through)  # revealed: type[Any]
+```
+
+The related model and the model of the intermediate table can be given as a class or as the name of
+a model in the same module:
+
+```py
+class Author(models.Model):
+    books = models.ManyToManyField("Novel", through="Authorship")
+
+class Novel(models.Model):
+    pass
+
+class Authorship(models.Model):
+    author = models.ForeignKey(Author, on_delete=models.CASCADE)
+    novel = models.ForeignKey(Novel, on_delete=models.CASCADE)
+
+def _(author: Author):
+    reveal_type(author.books)  # revealed: ManyRelatedManager[Novel, Authorship]
+    reveal_type(author.books.first())  # revealed: Novel | None
+
+reveal_type(Author.books.through)  # revealed: type[Authorship]
 ```
 
 ## Managers

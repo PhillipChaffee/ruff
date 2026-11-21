@@ -52,11 +52,18 @@ pub(in crate::types) fn is_foreign_key<'db>(
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, get_size2::GetSize, salsa::SalsaValue)]
 struct Field<'db> {
+    /// The name of the attribute that Django creates for the field.
     name: Name,
+    /// The name that the field is assigned to in the class body. It differs from `name` if the
+    /// field construction has a `name` argument.
+    symbol: Name,
     ty: Type<'db>,
     /// The type of the first argument of the field construction, which names the related model
     /// of a relation field: `Author` or `"Author"` in `ForeignKey(Author, ...)`.
     to: Option<Type<'db>>,
+    /// The type of the `through` argument of a `ManyToManyField`, which names the model of the
+    /// intermediate table.
+    through: Option<Type<'db>>,
     metadata: FieldMetadata,
 }
 
@@ -69,9 +76,11 @@ impl<'db> Field<'db> {
         definition: Definition<'db>,
     ) -> Self {
         let mut field = Field {
+            symbol: name.clone(),
             name,
             ty,
             to: None,
+            through: None,
             metadata: FieldMetadata::default(),
         };
         let module = parsed_module(db, definition.python_file(db)).load(db);
@@ -94,6 +103,10 @@ impl<'db> Field<'db> {
             .arguments
             .find_argument_value("to", 0)
             .map(|to| definition_expression_type(db, definition, to));
+        field.through = call
+            .arguments
+            .find_keyword("through")
+            .map(|through| definition_expression_type(db, definition, &through.value));
 
         if let Some(name) = call.arguments.find_keyword("name")
             && let Some(name) =
@@ -831,7 +844,19 @@ fn related_model<'db>(
     model: StaticClassLiteral<'db>,
     field: &Field<'db>,
 ) -> Option<Type<'db>> {
-    let to = field.to?;
+    model_reference(db, env, declaring, model, field.to?)
+}
+
+/// Return the model that `reference` denotes: a model class, the name of a model in the module of
+/// `declaring`, or `"self"` for `model`.
+fn model_reference<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+    declaring: StaticClassLiteral<'db>,
+    model: StaticClassLiteral<'db>,
+    reference: Type<'db>,
+) -> Option<Type<'db>> {
+    let to = reference;
     let related = match to.as_string_literal() {
         Some(reference) if reference.value(db) == "self" => {
             return Some(Type::instance(db, env, model.default_specialization(db)));
@@ -874,6 +899,9 @@ pub(in crate::types) fn refined_field_type<'db>(
     ty: Type<'db>,
 ) -> Option<Type<'db>> {
     let (field_class, specialization) = ty.nominal_class(db, env)?.static_class_literal(db)?;
+    if field_class.name(db) == "ManyToManyField" {
+        return refined_many_to_many_type(db, env, class, name, field_class, specialization?);
+    }
     // A related model that the stubs or the constructor already determined takes precedence.
     if specialization.is_some_and(|specialization| {
         specialization.types(db).iter().any(|ty| {
@@ -913,6 +941,81 @@ pub(in crate::types) fn refined_field_type<'db>(
             generic_context.specialize(db, vec![value, value])
         }),
     ))
+}
+
+/// Return a more precise type for the `ManyToManyField` `name` of the model `class`, if the
+/// related model or the model of the intermediate table is given as a string reference:
+/// ```py
+/// class Book(models.Model):
+///     tags = models.ManyToManyField("Tag", through="Tagging")
+/// ```
+fn refined_many_to_many_type<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+    class: StaticClassLiteral<'db>,
+    name: &str,
+    field_class: StaticClassLiteral<'db>,
+    specialization: Specialization<'db>,
+) -> Option<Type<'db>> {
+    let &[to, through] = specialization.types(db) else {
+        return None;
+    };
+    if !(to.is_dynamic() || through.is_dynamic()) || !is_model(db, class) {
+        return None;
+    }
+    let field = own_model_fields(db, class)
+        .iter()
+        .find(|field| field.name == name)?;
+    let resolve = |current: Type<'db>, reference: Option<Type<'db>>| {
+        if current.is_dynamic() {
+            reference.and_then(|reference| model_reference(db, env, class, class, reference))
+        } else {
+            None
+        }
+    };
+    let refined_to = resolve(to, field.to);
+    let refined_through = resolve(through, field.through);
+    if refined_to.is_none() && refined_through.is_none() {
+        return None;
+    }
+    Some(Type::instance(
+        db,
+        env,
+        field_class.apply_specialization(db, |generic_context| {
+            generic_context.specialize(
+                db,
+                vec![refined_to.unwrap_or(to), refined_through.unwrap_or(through)],
+            )
+        }),
+    ))
+}
+
+/// Returns whether `name` is the name that a field of the model `class` is assigned to, but not
+/// the name of the attribute that Django creates for it. `ty` is the type of the class member.
+///
+/// Django removes the original attribute of a field whose `name` argument renames it:
+/// ```py
+/// class Article(models.Model):
+///     views = models.IntegerField(name="view_count")
+///
+/// # Article().views does not exist.
+/// ```
+pub(in crate::types) fn is_renamed_field<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+    class: StaticClassLiteral<'db>,
+    name: &str,
+    ty: Type<'db>,
+) -> bool {
+    ty.nominal_class(db, env).is_some_and(|field_class| {
+        field_class
+            .iter_mro(db)
+            .filter_map(ClassBase::into_class)
+            .any(|base| base.is_known(db, KnownClass::DjangoField))
+    }) && is_model(db, class)
+        && own_model_fields(db, class)
+            .iter()
+            .any(|field| field.symbol == name && field.name != name)
 }
 
 /// Synthesize `<parent>_ptr` and `<parent>_ptr_id` attributes for multi-table inheritance.
