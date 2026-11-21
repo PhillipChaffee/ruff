@@ -80,8 +80,8 @@ impl<'db> Field<'db> {
             call.arguments
                 .find_keyword("primary_key")
                 .is_some_and(|primary_key| {
-                    definition_expression_type(db, definition, &primary_key.value)
-                        == Type::bool_literal(true)
+                    definition_expression_type(db, definition, &primary_key.value).as_bool_literal()
+                        == Some(true)
                 });
         field.metadata.has_choices =
             call.arguments
@@ -90,7 +90,7 @@ impl<'db> Field<'db> {
                     !definition_expression_type(db, definition, &choices.value).is_none(db)
                 });
         field.metadata.null = call.arguments.find_keyword("null").is_some_and(|null| {
-            definition_expression_type(db, definition, &null.value) == Type::bool_literal(true)
+            definition_expression_type(db, definition, &null.value).as_bool_literal() == Some(true)
         });
         field.metadata.to_field = call
             .arguments
