@@ -787,15 +787,42 @@ class Article(models.Model):
     objects = ArticleQuerySet.as_manager()
     reviewed = models.Manager.from_queryset(ArticleQuerySet)()
 
+reveal_type(Article.objects)  # revealed: Manager[Article, ArticleQuerySet]
 reveal_type(Article.objects.all().published())  # revealed: ArticleQuerySet
+reveal_type(Article.objects.published())  # revealed: ArticleQuerySet
+reveal_type(Article.objects.published().published())  # revealed: ArticleQuerySet
 
-# TODO: Should not be an error, and the type should be `ArticleQuerySet`.
-# error: [missing-attribute]
-reveal_type(Article.objects.published())  # revealed: Unknown
-
-# TODO: Should not be an error, and the type should be `ArticleQuerySet`.
+# TODO: Should not be an error, and the type should be `ArticleQuerySet`. django-stubs declares
+# the return type of `from_queryset` as `type[Self]`, which loses the `QuerySet` class.
 # error: [missing-attribute]
 reveal_type(Article.reviewed.published())  # revealed: Unknown
+```
+
+The manager only has the public methods that the custom `QuerySet` class adds. Django does not copy
+private methods, other attributes, or the methods of `QuerySet` that only make sense on a `QuerySet`,
+such as `delete()`:
+
+```py
+class BookQuerySet(models.QuerySet["Book"]):
+    default_ordering = "title"
+
+    def by_title(self, title: str) -> "BookQuerySet":
+        return self.filter(title=title)
+
+    def _recent(self) -> "BookQuerySet":
+        return self
+
+class Book(models.Model):
+    title = models.CharField(max_length=200)
+
+    objects = BookQuerySet.as_manager()
+
+reveal_type(Book.objects.by_title("Example"))  # revealed: BookQuerySet
+Book.objects.by_title(1)  # error: [invalid-argument-type]
+
+Book.objects._recent()  # error: [missing-attribute]
+Book.objects.default_ordering  # error: [missing-attribute]
+Book.objects.delete()  # error: [missing-attribute]
 ```
 
 ## `values()` and `values_list()`
@@ -908,10 +935,11 @@ def _(book: Book):
     book.objects  # error: [missing-attribute]
 ```
 
-A model has no other implicit class attributes:
+A model has no other implicit class attributes. django-stubs declares `objects` through a
+`__getattr__` method on the metaclass that only accepts the name `objects`, so we report any other
+name as an invalid call to that method:
 
 ```py
-# TODO: Should be a `missing-attribute` error.
 Book.nonexistent  # error: [invalid-attribute-access]
 ```
 
