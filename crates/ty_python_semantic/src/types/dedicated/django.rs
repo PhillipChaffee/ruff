@@ -325,9 +325,17 @@ pub(in crate::types) fn foreign_key_model_type<'db>(
     binding: &Binding<'db>,
 ) -> Option<Type<'db>> {
     let to = binding.parameter_type_by_name(db, "to", false).ok()??;
-    let model = to.to_instance_approximation(db, env)?;
     let null = binding.parameter_type_by_name(db, "null", false).ok()?;
-    Some(if null.and_then(Type::as_bool_literal) == Some(true) {
+    let is_nullable = null.and_then(Type::as_bool_literal) == Some(true);
+    let model = match to.to_instance_approximation(db, env) {
+        Some(model) => model,
+        // A string reference such as `ForeignKey("Author", null=True)`. We do not resolve
+        // the string to a model, but the field is still nullable: use `Any | None` so that
+        // `None` is not lost from the field's type.
+        None if is_nullable && to.as_string_literal().is_some() => Type::any(),
+        None => return None,
+    };
+    Some(if is_nullable {
         UnionType::from_two_elements(db, env, model, Type::none(db, env))
     } else {
         model
