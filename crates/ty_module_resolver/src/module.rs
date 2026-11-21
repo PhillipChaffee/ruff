@@ -287,6 +287,8 @@ pub enum KnownModule {
     DjangoDbModelsFields,
     #[strum(serialize = "django.db.models.fields.related")]
     DjangoDbModelsFieldsRelated,
+    #[strum(serialize = "django.db.models.fields.related_descriptors")]
+    DjangoDbModelsFieldsRelatedDescriptors,
     #[strum(serialize = "django.db.models.manager")]
     DjangoDbModelsManager,
     #[strum(serialize = "django.db.models.query")]
@@ -357,6 +359,9 @@ impl KnownModule {
             Self::DjangoDbModelsEnums => "django.db.models.enums",
             Self::DjangoDbModelsFields => "django.db.models.fields",
             Self::DjangoDbModelsFieldsRelated => "django.db.models.fields.related",
+            Self::DjangoDbModelsFieldsRelatedDescriptors => {
+                "django.db.models.fields.related_descriptors"
+            }
             Self::DjangoDbModelsManager => "django.db.models.manager",
             Self::DjangoDbModelsQuery => "django.db.models.query",
             Self::DjangoUtilsChoices => "django.utils.choices",
@@ -399,6 +404,7 @@ impl KnownModule {
             | Self::DjangoDbModelsEnums
             | Self::DjangoDbModelsFields
             | Self::DjangoDbModelsFieldsRelated
+            | Self::DjangoDbModelsFieldsRelatedDescriptors
             | Self::DjangoDbModelsManager
             | Self::DjangoDbModelsQuery
             | Self::DjangoUtilsChoices
