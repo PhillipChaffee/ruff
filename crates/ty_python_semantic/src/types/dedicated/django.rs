@@ -240,6 +240,10 @@ pub(in crate::types) fn synthesized_member<'db>(
     specialization: Option<Specialization<'db>>,
     name: &str,
 ) -> Option<Type<'db>> {
+    if class.is_known(db, KnownClass::DjangoBaseManager) {
+        return manager_queryset_method(db, env, specialization?, name);
+    }
+
     // A quick filter on the name, so that we can return quickly for almost all attribute names.
     if !(matches!(name, "id" | "pk")
         || name.ends_with("_id")
@@ -258,6 +262,50 @@ pub(in crate::types) fn synthesized_member<'db>(
             .or_else(|| date_navigation_method(db, env, class, specialization, name))
             .or_else(|| foreign_key_id_member(db, env, class, specialization, name)),
     }
+}
+
+/// Synthesize the methods that a manager copies from its `QuerySet` class.
+///
+/// A manager created with `QuerySet.as_manager()` or `Manager.from_queryset()` has a copy of every
+/// public method that the custom `QuerySet` class adds. For example, `Book.objects.published()`
+/// calls `BookQuerySet.published`:
+/// ```py
+/// class BookQuerySet(models.QuerySet["Book"]):
+///     def published(self) -> "BookQuerySet": ...
+///
+/// class Book(models.Model):
+///     objects = BookQuerySet.as_manager()
+/// ```
+///
+/// django-stubs gives such a manager the type `Manager[Book, BookQuerySet]`, so we look the method
+/// up on the second type argument.
+fn manager_queryset_method<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+    specialization: Specialization<'db>,
+    name: &str,
+) -> Option<Type<'db>> {
+    // Django does not copy private methods.
+    if name.starts_with('_') {
+        return None;
+    }
+    let queryset_ty = *specialization.types(db).get(1)?;
+
+    // The stubs already declare the methods of `QuerySet` itself on the manager, or leave them
+    // out on purpose, so only consider the classes below `QuerySet`.
+    queryset_ty
+        .nominal_class(db, env)?
+        .iter_mro(db)
+        .filter_map(ClassBase::into_class)
+        .map_while(|base| base.static_class_literal(db))
+        .take_while(|(base, _)| !base.is_known(db, KnownClass::DjangoQuerySet))
+        .find(|(base, _)| !class_member(db, base.body_scope(db), name).is_undefined())?;
+
+    let method = queryset_ty
+        .member(db, env, name)
+        .place
+        .ignore_possibly_undefined()?;
+    matches!(method, Type::BoundMethod(_)).then_some(method)
 }
 
 /// Synthesize `id` and `pk` attributes for Django models.
