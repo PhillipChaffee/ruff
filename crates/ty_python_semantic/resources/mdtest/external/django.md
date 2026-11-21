@@ -1587,15 +1587,26 @@ reveal_type(Status.DRAFT.label)  # revealed: str | _StrPromise
 
 ## Settings
 
-`django.conf.settings` gives access to the settings of the project. Django raises `AttributeError`
-for a setting that does not exist:
+`django.conf.settings` gives access to the settings of the project. Django's own settings have the
+types of their defaults in `django.conf.global_settings`:
 
 ```py
 from django.conf import settings
 
-# TODO: Should be `bool`.
-reveal_type(settings.DEBUG)  # revealed: Any
+reveal_type(settings.DEBUG)  # revealed: bool
+reveal_type(settings.INSTALLED_APPS)  # revealed: list[str]
+```
 
+We do not read the project's settings module, so a setting that the project adds has the type `Any`:
+
+```py
+reveal_type(settings.PAYMENT_PROVIDER)  # revealed: Any
+```
+
+Django raises `AttributeError` for a setting that does not exist. We cannot tell a setting that does
+not exist from one that the project adds:
+
+```py
 # TODO: Should be an error.
 settings.NOT_A_SETTING
 ```

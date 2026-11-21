@@ -316,6 +316,9 @@ pub(in crate::types) fn synthesized_member<'db>(
     if class.is_known(db, KnownClass::DjangoBaseManager) {
         return manager_queryset_method(db, env, specialization?, name);
     }
+    if let Some(setting) = setting(db, env, class, name) {
+        return Some(setting);
+    }
 
     if name == "__init__" && is_model(db, class) {
         return init_method(db, env, class, specialization);
@@ -488,6 +491,33 @@ fn own_property_names<'db>(db: &'db dyn Db, class: StaticClassLiteral<'db>) -> B
         })
         .map(|symbol| symbol.name().clone())
         .collect()
+}
+
+/// Return the type of the setting `name` on `django.conf.settings`, an instance of `LazySettings`.
+///
+/// The stubs give every setting the type `Any`, through a `__getattr__` method. Django's own
+/// settings have default values in `django.conf.global_settings`, which the stubs declare with
+/// their types, such as `DEBUG: bool`. We use those types. We do not read the project's settings
+/// module, so a setting that the project adds keeps the type `Any`.
+fn setting<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+    class: StaticClassLiteral<'db>,
+    name: &str,
+) -> Option<Type<'db>> {
+    // Settings are uppercase. Check the names first to avoid a module-resolution query for every
+    // class with an unresolved attribute.
+    if class.name(db) != "LazySettings"
+        || !name.starts_with(|c: char| c.is_ascii_uppercase())
+        || name.contains(|c: char| c.is_ascii_lowercase())
+        || !file_to_module(db, class.body_scope(db).program_file(db).resolver_file(db))
+            .is_some_and(|module| module.is_known(db, KnownModule::DjangoConf))
+    {
+        return None;
+    }
+    known_module_symbol(db, env, KnownModule::DjangoConfGlobalSettings, name)
+        .place
+        .ignore_possibly_undefined()
 }
 
 /// Synthesize the attribute of a field whose `name` argument differs from the name it is assigned

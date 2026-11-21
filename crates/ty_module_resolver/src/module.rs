@@ -277,6 +277,10 @@ pub enum KnownModule {
     #[strum(serialize = "struct", serialize = "_struct")]
     Struct,
     // Third-party modules
+    #[strum(serialize = "django.conf")]
+    DjangoConf,
+    #[strum(serialize = "django.conf.global_settings")]
+    DjangoConfGlobalSettings,
     #[strum(serialize = "django.contrib.auth.models")]
     DjangoContribAuthModels,
     #[strum(serialize = "django.db.models.base")]
@@ -354,6 +358,8 @@ impl KnownModule {
             Self::Templatelib => "string.templatelib",
             Self::Numbers => "numbers",
             Self::Struct => "struct",
+            Self::DjangoConf => "django.conf",
+            Self::DjangoConfGlobalSettings => "django.conf.global_settings",
             Self::DjangoContribAuthModels => "django.contrib.auth.models",
             Self::DjangoDbModelsBase => "django.db.models.base",
             Self::DjangoDbModelsEnums => "django.db.models.enums",
@@ -399,7 +405,9 @@ impl KnownModule {
     /// Return `true` if this module is provided by a supported third-party package.
     pub const fn is_third_party(self) -> bool {
         match self {
-            Self::DjangoContribAuthModels
+            Self::DjangoConf
+            | Self::DjangoConfGlobalSettings
+            | Self::DjangoContribAuthModels
             | Self::DjangoDbModelsBase
             | Self::DjangoDbModelsEnums
             | Self::DjangoDbModelsFields
