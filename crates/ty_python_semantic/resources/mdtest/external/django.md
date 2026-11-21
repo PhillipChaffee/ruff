@@ -506,21 +506,64 @@ def _(book: Book):
     reveal_type(book.cover_id)  # revealed: str | None
 ```
 
-We do not resolve a reference with an app label, or the name of something that is not a model. A
-foreign key declared with `null=True` is still nullable:
+We do not resolve the name of something that is not a model, or a reference to an app that we cannot
+find. A foreign key declared with `null=True` is still nullable:
 
 ```py
 class Review(models.Model):
-    book = models.ForeignKey("library.Book", on_delete=models.CASCADE)
-    editor = models.ForeignKey("library.Author", null=True, on_delete=models.SET_NULL)
+    book = models.ForeignKey("unknown_app.Book", on_delete=models.CASCADE)
+    editor = models.ForeignKey("unknown_app.Author", null=True, on_delete=models.SET_NULL)
     missing = models.ForeignKey("Missing", on_delete=models.CASCADE)
 
 def _(review: Review):
-    # TODO: Should be `Book`.
     reveal_type(review.book)  # revealed: Any
-    # TODO: Should be `Author | None`.
     reveal_type(review.editor)  # revealed: Any | None
     reveal_type(review.missing)  # revealed: Any
+```
+
+## References to models of another app
+
+A reference of the form `"<app label>.<model>"` names a model of another app. The label is by
+default the name of the app's package, and we look for the model in the `models` module of a package
+with that name:
+
+`library/__init__.py`:
+
+```py
+```
+
+`library/models.py`:
+
+```py
+from django.db import models
+
+class Author(models.Model):
+    name = models.CharField(max_length=100)
+
+class Book(models.Model):
+    isbn = models.CharField(max_length=13, primary_key=True)
+```
+
+`reviews/__init__.py`:
+
+```py
+```
+
+`reviews/models.py`:
+
+```py
+from django.db import models
+
+class Review(models.Model):
+    book = models.ForeignKey("library.Book", on_delete=models.CASCADE)
+    editor = models.ForeignKey("library.Author", null=True, on_delete=models.SET_NULL)
+    readers = models.ManyToManyField("library.Author")
+
+def _(review: Review):
+    reveal_type(review.book)  # revealed: Book
+    reveal_type(review.book_id)  # revealed: str
+    reveal_type(review.editor)  # revealed: Author | None
+    reveal_type(review.readers.get())  # revealed: Author
 ```
 
 ## Choices
