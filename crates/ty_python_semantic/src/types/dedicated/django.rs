@@ -790,6 +790,61 @@ pub(in crate::types) fn from_queryset_return_type<'db>(
     ))
 }
 
+/// Infer the row type of `QuerySet.values_list()` from the fields named in the call.
+///
+/// The stubs declare the rows as `Any`. When every field is named by a string literal, each row is
+/// a tuple of those fields' types, or a single field's type with `flat=True`:
+/// ```py
+/// class Article(models.Model):
+///     title = models.CharField(max_length=100)
+///     rating = models.IntegerField()
+///
+/// Article.objects.values_list("title", "rating")  # rows are `tuple[str, int]`
+/// Article.objects.values_list("title", flat=True)  # rows are `str`
+/// ```
+///
+/// Returns `None`, which keeps the declared type, for calls that this does not model: a call
+/// without fields, a field that is not a string literal, and a lookup that spans a relation such
+/// as `"author__name"`.
+pub(in crate::types) fn values_list_return_type<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+    declared: Type<'db>,
+    fields: impl IntoIterator<Item = Type<'db>>,
+    flat: bool,
+) -> Option<Type<'db>> {
+    let (queryset, specialization) = declared.nominal_class(db, env)?.static_class_literal(db)?;
+    if !queryset.is_known(db, KnownClass::DjangoQuerySet) {
+        return None;
+    }
+    let model = specialization?.types(db).first().copied()?;
+
+    let columns = fields
+        .into_iter()
+        .map(|field| {
+            let name = field.as_string_literal()?.value(db);
+            model
+                .member(db, env, name)
+                .place
+                .ignore_possibly_undefined()
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let row = match columns.as_slice() {
+        [] => return None,
+        [column] if flat => *column,
+        _ if flat => return None,
+        _ => Type::heterogeneous_tuple(db, env, columns),
+    };
+
+    Some(Type::instance(
+        db,
+        env,
+        queryset.apply_specialization(db, |generic_context| {
+            generic_context.specialize(db, vec![model, row])
+        }),
+    ))
+}
+
 /// Synthesize `<field>_id` attributes for foreign keys using the referenced field's type.
 ///
 /// For example, `Book().author_id` has type `int`, matching `Author`'s automatic primary key:

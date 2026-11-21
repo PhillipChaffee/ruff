@@ -941,11 +941,20 @@ class Article(models.Model):
 # TODO: Should be a `TypedDict` with a `title` key of type `str`.
 reveal_type(Article.objects.values("title").get())  # revealed: dict[str, Any]
 
-# TODO: Should be `tuple[str, int]`.
-reveal_type(Article.objects.values_list("title", "rating").get())  # revealed: Any
+reveal_type(Article.objects.values_list("title", "rating").get())  # revealed: tuple[str, int]
+reveal_type(Article.objects.values_list("title", flat=True).get())  # revealed: str
+reveal_type(Article.objects.filter(rating=5).values_list("pk").get())  # revealed: tuple[int]
+```
 
-# TODO: Should be `str`.
-reveal_type(Article.objects.values_list("title", flat=True).get())  # revealed: Any
+The rows keep the declared type `Any` when a field is not named by a string literal, when a lookup
+spans a relation, and for named tuples:
+
+```py
+def _(field: str):
+    reveal_type(Article.objects.values_list(field).get())  # revealed: Any
+
+reveal_type(Article.objects.values_list("title__length").get())  # revealed: Any
+reveal_type(Article.objects.values_list("title", named=True).get())  # revealed: Any
 ```
 
 ## Annotations
