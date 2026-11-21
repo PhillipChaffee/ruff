@@ -359,6 +359,30 @@ def _(review: Review):
     reveal_type(review.book_id)  # revealed: str
 ```
 
+### String references
+
+The related model can be given as a string reference. We do not resolve the string yet, but a
+foreign key declared with `null=True` is still nullable:
+
+```py
+from django.db import models
+
+class Author(models.Model):
+    mentor = models.ForeignKey("self", null=True, on_delete=models.SET_NULL)
+
+class Book(models.Model):
+    author = models.ForeignKey("Author", on_delete=models.CASCADE)
+    editor = models.ForeignKey("Author", null=True, on_delete=models.SET_NULL)
+
+def _(book: Book, author: Author):
+    # TODO: Should be `Author`.
+    reveal_type(book.author)  # revealed: Any
+    # TODO: Should be `Author | None`.
+    reveal_type(book.editor)  # revealed: Any | None
+    # TODO: Should be `Author | None`.
+    reveal_type(author.mentor)  # revealed: Any | None
+```
+
 ## Choices
 
 The `choices` parameter can be used to map the actual stored values for a field to human-readable
