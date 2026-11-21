@@ -849,10 +849,15 @@ def _(category: Category):
 
 ## Reverse accessors across modules
 
-We only find the relation fields of models in the module that defines the related model. A relation
-that is declared in another module does not add a reverse accessor yet:
+A relation that is declared in another app also adds a reverse accessor. Django imports the `models`
+module of each installed app, so we look for relations in every `models` module of the project:
 
-`library.py`:
+`library/__init__.py`:
+
+```py
+```
+
+`library/models.py`:
 
 ```py
 from django.db import models
@@ -861,19 +866,40 @@ class Author(models.Model):
     pass
 ```
 
-`shop.py`:
+`shop/__init__.py`:
+
+```py
+```
+
+`shop/models.py`:
 
 ```py
 from django.db import models
-from library import Author
+from library.models import Author
 
 class Order(models.Model):
     author = models.ForeignKey(Author, on_delete=models.CASCADE)
+    reviewer = models.ForeignKey("library.Author", on_delete=models.CASCADE, related_name="reviews")
 
 def _(author: Author):
-    # TODO: Should not be an error, and the type should be `QuerySet[Order, Order]`.
-    # error: [missing-attribute]
-    reveal_type(author.order_set.all())  # revealed: Unknown
+    reveal_type(author.order_set.get())  # revealed: Order
+    reveal_type(author.reviews.get())  # revealed: Order
+```
+
+A model in a module that is not a `models` module only adds reverse accessors to the models of its
+own module:
+
+`shop/drafts.py`:
+
+```py
+from django.db import models
+from library.models import Author
+
+class Draft(models.Model):
+    author = models.ForeignKey(Author, on_delete=models.CASCADE)
+
+def _(author: Author):
+    author.draft_set  # error: [missing-attribute]
 ```
 
 ## User model
@@ -914,7 +940,8 @@ def _(user: User):
 ## Primary key of an abstract model's subclasses
 
 An abstract model cannot be instantiated, so a value annotated with an abstract model is always an
-instance of a concrete subclass, which has a primary key:
+instance of a concrete subclass, which has a primary key. `pk` and `id` follow the primary keys of
+the concrete subclasses that we find:
 
 ```py
 from django.db import models
@@ -926,12 +953,42 @@ class Publication(models.Model):
 class Book(Publication):
     pass
 
-def _(publication: Publication):
-    # TODO: Should follow the primary key of the concrete subclasses.
-    reveal_type(publication.pk)  # revealed: Any
+class Magazine(Publication):
+    pass
 
-    # TODO: Should not be an error when every concrete subclass has an `id` field.
-    publication.id  # error: [missing-attribute]
+def _(publication: Publication):
+    reveal_type(publication.pk)  # revealed: int
+    reveal_type(publication.id)  # revealed: int
+```
+
+`id` is only available if every concrete subclass has an automatic primary key:
+
+```py
+class Document(models.Model):
+    class Meta:
+        abstract = True
+
+class Report(Document):
+    pass
+
+class Standard(Document):
+    code = models.CharField(max_length=20, primary_key=True)
+
+def _(document: Document):
+    reveal_type(document.pk)  # revealed: int | str
+    document.id  # error: [missing-attribute]
+```
+
+An abstract model without concrete subclasses keeps the `pk` type from the stubs:
+
+```py
+class Unused(models.Model):
+    class Meta:
+        abstract = True
+
+def _(unused: Unused):
+    reveal_type(unused.pk)  # revealed: Any
+    unused.id  # error: [missing-attribute]
 ```
 
 ## Choices classes

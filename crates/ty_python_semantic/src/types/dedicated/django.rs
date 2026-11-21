@@ -1,7 +1,11 @@
+use ruff_db::files::File;
 use ruff_db::parsed::parsed_module;
 use ruff_python_ast::name::Name;
 use rustc_hash::FxHashSet;
-use ty_module_resolver::{ImportingFile, KnownModule, ModuleName, file_to_module, resolve_module};
+use ty_module_resolver::{
+    ImportingFile, KnownModule, Module, ModuleName, ResolverEnvironment, SearchPath,
+    file_to_module, list_modules, resolve_module,
+};
 use ty_python_core::{
     ProgramFile,
     definition::{Definition, DefinitionKind},
@@ -18,7 +22,7 @@ use crate::types::{
     KnownClass, Parameter, Parameters, SelfTypeVarOrigin, Signature, Specialization,
     StaticClassLiteral, Type, UnionType, binding_type, definition_expression_type,
 };
-use crate::{Db, ProgramEnvironment};
+use crate::{Db, FxIndexSet, ProgramEnvironment};
 
 /// Returns whether `class` is a subclass of Django's `Model`.
 pub(in crate::types) fn is_model<'db>(db: &'db dyn Db, class: StaticClassLiteral<'db>) -> bool {
@@ -531,7 +535,8 @@ struct ReverseAccessor<'db> {
 /// # Author().book_set is a manager for Book; Author().profile has type Profile.
 /// ```
 ///
-/// We only find relation fields of the models in the module that defines the related model.
+/// We find the relation fields of the models in the module that defines the related model, and in
+/// the project's `models` modules (see [`models_modules`]).
 fn reverse_accessor<'db>(
     db: &'db dyn Db,
     class: StaticClassLiteral<'db>,
@@ -543,22 +548,21 @@ fn reverse_accessor<'db>(
         .map(|accessor| accessor.ty)
 }
 
-/// All reverse accessors that the models in the module of `class` add to it.
+/// All reverse accessors that the project's models add to `class`.
 #[salsa::tracked(returns(deref), cycle_initial=|_, _, _| Box::default(), heap_size=ruff_memory_usage::heap_size)]
 fn reverse_accessors<'db>(
     db: &'db dyn Db,
     class: StaticClassLiteral<'db>,
 ) -> Box<[ReverseAccessor<'db>]> {
-    let scope = global_scope(db, class.body_scope(db).program_file(db));
-    let env = ProgramEnvironment::from_scope(scope);
+    let file = class.body_scope(db).program_file(db);
+    let env = ProgramEnvironment::from_file(file);
     let target = Type::instance(db, &env, class.default_specialization(db));
 
-    let sources = use_def_map(db, scope)
-        .all_end_of_scope_symbol_bindings()
-        .flat_map(|(_, bindings)| bindings.filter_map(|binding| binding.binding.definition()))
-        .filter_map(|definition| binding_type(db, definition).as_class_literal()?.as_static())
+    let sources = project_models(db, file)
+        .iter()
+        .copied()
         // Abstract models have no table, so nothing can refer to their rows.
-        .filter(|source| is_model(db, *source) && !model_metadata(db, *source).is_abstract);
+        .filter(|source| !model_metadata(db, *source).is_abstract);
 
     let mut accessors = Vec::new();
     for source in sources {
@@ -637,6 +641,67 @@ fn reverse_accessors<'db>(
         }
     }
     accessors.into_boxed_slice()
+}
+
+/// The models that Django knows about when it uses a model defined in `file`: the models in the
+/// global scope of `file` itself and of the project's `models` modules (see [`models_modules`]).
+#[salsa::tracked(returns(deref), cycle_initial=|_, _, _| Box::default(), heap_size=ruff_memory_usage::heap_size)]
+fn project_models<'db>(db: &'db dyn Db, file: ProgramFile<'db>) -> Box<[StaticClassLiteral<'db>]> {
+    let env = ProgramEnvironment::from_file(file);
+    // A module that several `models` modules import from contributes each model only once.
+    let models: FxIndexSet<_> = std::iter::once(file)
+        .chain(
+            models_modules(db, env.resolver_environment(db))
+                .iter()
+                .map(|module| ProgramFile::new(db, *module, env.program(db))),
+        )
+        .flat_map(|file| {
+            use_def_map(db, global_scope(db, file))
+                .all_end_of_scope_symbol_bindings()
+                .flat_map(|(_, bindings)| {
+                    bindings.filter_map(|binding| binding.binding.definition())
+                })
+        })
+        .filter_map(|definition| binding_type(db, definition).as_class_literal()?.as_static())
+        .filter(|class| is_model(db, *class))
+        .collect();
+    models.into_iter().collect()
+}
+
+/// The files of the project's `models` modules, including the submodules of a `models` package.
+///
+/// Django imports the `models` module of each installed app when it starts, and a model only
+/// takes part in relations once its module is imported. We do not read the project's settings to
+/// find the installed apps, so we treat every first-party module with a `models` component in its
+/// name as the models of an app: `library.models` and `library.models.book`, for example.
+#[salsa::tracked(returns(deref), heap_size=ruff_memory_usage::heap_size)]
+fn models_modules<'db>(
+    db: &'db dyn Db,
+    resolver_environment: ResolverEnvironment<'db>,
+) -> Box<[File]> {
+    let mut files = Vec::new();
+    let mut pending: Vec<Module<'db>> = list_modules(db, resolver_environment)
+        .iter()
+        .copied()
+        .filter(|module| {
+            module
+                .search_path(db)
+                .is_some_and(SearchPath::is_first_party)
+        })
+        .collect();
+    while let Some(module) = pending.pop() {
+        if module
+            .name(db)
+            .components()
+            .any(|component| component == "models")
+            && let Some(file) = module.file(db)
+        {
+            files.push(file);
+        }
+        pending.extend(module.all_submodules(db));
+    }
+    files.sort_unstable();
+    files.into_boxed_slice()
 }
 
 /// Return the type of the manager that a `ForeignKey` adds to its related model.
@@ -792,9 +857,62 @@ fn primary_key_member<'db>(
         }
     }
 
-    // Abstract models do not have an automatic primary key.
+    // An abstract model does not have an automatic primary key, but every instance of it is an
+    // instance of a concrete subclass. Use the primary keys of the concrete subclasses that we
+    // know about, if all of them have the attribute:
+    // ```py
+    // class Publication(models.Model):
+    //     class Meta:
+    //         abstract = True
+    //
+    // class Book(Publication): ...
+    //
+    // def f(publication: Publication):
+    //     publication.pk  # `int`, the primary key of `Book`
+    // ```
     if model_metadata(db, class).is_abstract {
-        return None;
+        let inherits_from = |model: StaticClassLiteral<'db>, base: StaticClassLiteral<'db>| {
+            model != base
+                && model
+                    .iter_mro(db, None)
+                    .filter_map(ClassBase::into_class)
+                    .filter_map(|model_base| model_base.static_class_literal(db))
+                    .any(|(model_base, _)| model_base == base)
+        };
+        let (abstract_subclasses, concrete_subclasses): (Vec<_>, Vec<_>) =
+            project_models(db, class.body_scope(db).program_file(db))
+                .iter()
+                .copied()
+                .filter(|model| inherits_from(*model, class))
+                .partition(|model| model_metadata(db, *model).is_abstract);
+        // The attribute lookup on an abstract subclass also reaches this class. Such a subclass
+        // without concrete subclasses of its own must not get the primary key of its siblings.
+        if !abstract_subclasses.iter().all(|abstract_subclass| {
+            concrete_subclasses
+                .iter()
+                .any(|concrete| inherits_from(*concrete, *abstract_subclass))
+        }) {
+            return None;
+        }
+        let mut members = concrete_subclasses
+            .into_iter()
+            .map(|subclass| primary_key_member(db, env, subclass, None, name))
+            .collect::<Option<Vec<_>>>()?
+            .into_iter();
+        let first = members.next()?;
+        return Some(
+            members.fold(first, |primary_key, member| match (primary_key, member) {
+                (PrimaryKeyMember::Automatic(ty), PrimaryKeyMember::Automatic(other))
+                    if ty == other =>
+                {
+                    PrimaryKeyMember::Automatic(ty)
+                }
+                (
+                    PrimaryKeyMember::Automatic(ty) | PrimaryKeyMember::Explicit(ty),
+                    PrimaryKeyMember::Automatic(other) | PrimaryKeyMember::Explicit(other),
+                ) => PrimaryKeyMember::Explicit(UnionType::from_two_elements(db, env, ty, other)),
+            }),
+        );
     }
 
     known_module_symbol(db, env, KnownModule::DjangoDbModelsFields, "AutoField")
