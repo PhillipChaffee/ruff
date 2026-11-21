@@ -1729,6 +1729,15 @@ impl<'db> StaticClassLiteral<'db> {
             }
         });
 
+        if member
+            .inner
+            .place
+            .ignore_possibly_undefined()
+            .is_some_and(|ty| django::is_renamed_field(db, env, self, name, ty))
+        {
+            return Member::unbound();
+        }
+
         if self.has_own_slot_descriptor(db, name) {
             return Member::definitely_declared(self.own_slot_descriptor(
                 db,
