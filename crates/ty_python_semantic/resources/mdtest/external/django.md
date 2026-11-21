@@ -1,6 +1,6 @@
 # Django
 
-Django support in ty currently relies on the stubs from [django-types]:
+Django support in ty currently relies on the stubs from [django-stubs]:
 
 ```toml
 [environment]
@@ -8,7 +8,9 @@ python-version = "3.13"
 python-platform = "linux"
 
 [project]
-dependencies = ["django-types==0.24.0"]
+dependencies = [
+    "django-stubs @ git+https://github.com/typeddjango/django-stubs.git@44457d47e03845c27b560936ef0455d5dfc7b7d8",
+]
 ```
 
 ## Basic model
@@ -589,4 +591,4 @@ def _(book1: Book1, book2: Book2):
     reveal_type(book2.title)  # revealed: str
 ```
 
-[django-types]: https://github.com/sbdchd/django-types
+[django-stubs]: https://github.com/typeddjango/django-stubs
