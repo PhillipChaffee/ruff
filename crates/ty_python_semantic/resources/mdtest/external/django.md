@@ -1658,18 +1658,104 @@ reveal_type(settings.DEBUG)  # revealed: bool
 reveal_type(settings.INSTALLED_APPS)  # revealed: list[str]
 ```
 
-We do not read the project's settings module, so a setting that the project adds has the type `Any`:
+Without a settings module that we can find (see below), any other setting has the type `Any`:
 
 ```py
 reveal_type(settings.PAYMENT_PROVIDER)  # revealed: Any
+settings.NOT_A_SETTING  # ok
 ```
 
-Django raises `AttributeError` for a setting that does not exist. We cannot tell a setting that does
-not exist from one that the project adds:
+## Project settings
+
+Django reads the settings module that the `DJANGO_SETTINGS_MODULE` environment variable names. We
+use the default that the project's `manage.py` sets. We read the settings module without running it:
+
+`manage.py`:
 
 ```py
-# TODO: Should be an error.
-settings.NOT_A_SETTING
+import os
+import sys
+
+def main() -> None:
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "mysite.settings")
+    from django.core.management import execute_from_command_line
+
+    execute_from_command_line(sys.argv)
+```
+
+`mysite/__init__.py`:
+
+```py
+```
+
+`mysite/base.py`:
+
+```py
+PAYMENT_PROVIDER = "stripe"
+DEBUG = False
+```
+
+`mysite/settings.py`:
+
+```py
+from .base import *
+
+DEBUG = True
+RETRY_LIMIT = 3
+```
+
+Settings have the types of their values in the settings module, or else of Django's defaults. Django
+raises `AttributeError` for a setting that is defined in neither:
+
+`app.py`:
+
+```py
+from django.conf import settings
+
+reveal_type(settings.RETRY_LIMIT)  # revealed: int
+reveal_type(settings.PAYMENT_PROVIDER)  # revealed: str
+reveal_type(settings.DEBUG)  # revealed: bool
+reveal_type(settings.INSTALLED_APPS)  # revealed: list[str]
+
+settings.NOT_A_SETTING  # error: [invalid-attribute-access]
+```
+
+## Settings that we cannot fully see
+
+A settings module can define settings that we cannot see, for example through a star import of a
+module that we cannot find. We do not report unknown settings then:
+
+`manage.py`:
+
+```py
+import os
+
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "mysite.settings")
+```
+
+`mysite/__init__.py`:
+
+```py
+```
+
+`mysite/settings.py`:
+
+```py
+try:
+    from .local import *  # error: [import-not-found]
+except ImportError:
+    pass
+
+RETRY_LIMIT = 3
+```
+
+`app.py`:
+
+```py
+from django.conf import settings
+
+reveal_type(settings.RETRY_LIMIT)  # revealed: int
+reveal_type(settings.NOT_A_SETTING)  # revealed: Any
 ```
 
 [django-stubs]: https://github.com/typeddjango/django-stubs
