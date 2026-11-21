@@ -31,6 +31,7 @@ use crate::types::tuple::{TupleSpec, TupleSpecBuilder, TupleType};
 use ty_python_core::definition::{Definition, DefinitionKind};
 use ty_python_core::scope::ScopeKind;
 
+use crate::types::dedicated::django;
 use crate::types::{
     BindingContext, CallableType, DynamicType, GenericContext, IntersectionBuilder,
     IntersectionType, InvalidTypeExpression, KnownClass, KnownInstanceType, LintDiagnosticGuard,
@@ -164,14 +165,18 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
         self.context.inference_flags |= InferenceFlags::IN_TYPE_ALIAS;
         let ty = self.infer_type_expression(value);
         let db = self.db();
+        let target = match definition.kind(db) {
+            DefinitionKind::Assignment(assignment) => Some(assignment.target(self.module())),
+            DefinitionKind::AnnotatedAssignment(assignment) => {
+                Some(assignment.target(self.module()))
+            }
+            _ => None,
+        };
+        let ty = target
+            .and_then(ast::Expr::as_name_expr)
+            .and_then(|name| django::type_alias_override(db, self.program_file(), &name.id, ty))
+            .unwrap_or(ty);
         let ty = if ty.has_unguarded_alias_cycle(db) {
-            let target = match definition.kind(db) {
-                DefinitionKind::Assignment(assignment) => Some(assignment.target(self.module())),
-                DefinitionKind::AnnotatedAssignment(assignment) => {
-                    Some(assignment.target(self.module()))
-                }
-                _ => None,
-            };
             if let Some(name) = target.and_then(ast::Expr::as_name_expr)
                 && let Some(diagnostic) = self
                     .context

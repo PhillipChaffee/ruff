@@ -47,6 +47,7 @@ use crate::types::constraints::{
 };
 use crate::types::context::LintDiagnosticGuardBuilder;
 use crate::types::cyclic::PairVisitor;
+use crate::types::dedicated::django;
 use crate::types::dedicated::pydantic::{self, ConfigBoolean};
 use crate::types::diagnostic::{
     CALL_TO_FUNCTION_WITH_UNKNOWN_SIGNATURE, INVALID_ARGUMENT_TYPE, INVALID_DATACLASS,
@@ -2015,6 +2016,20 @@ impl<'db> Bindings<'db> {
                         }
                         _ => {}
                     },
+
+                    Type::BoundMethod(bound_method)
+                        if bound_method
+                            .function(db)
+                            .is_some_and(|function| function.name(db) == "from_queryset")
+                            && let Some(manager) = django::from_queryset_return_type(
+                                db,
+                                env,
+                                bound_method.self_instance(db),
+                                overload,
+                            ) =>
+                    {
+                        overload.set_return_type(manager);
+                    }
 
                     Type::BoundMethod(bound_method)
                         if let Type::PropertyInstance(property) =
