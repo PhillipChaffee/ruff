@@ -7,7 +7,7 @@ use ty_python_core::{
     place_table, semantic_index, use_def_map,
 };
 
-use crate::place::{known_module_symbol, place_from_bindings};
+use crate::place::{global_symbol, known_module_symbol, place_from_bindings};
 use crate::types::call::Binding;
 use crate::types::infer::nearest_enclosing_class;
 use crate::types::member::class_member;
@@ -54,6 +54,9 @@ pub(in crate::types) fn is_foreign_key<'db>(
 struct Field<'db> {
     name: Name,
     ty: Type<'db>,
+    /// The type of the first argument of the field construction, which names the related model
+    /// of a relation field: `Author` or `"Author"` in `ForeignKey(Author, ...)`.
+    to: Option<Type<'db>>,
     metadata: FieldMetadata,
 }
 
@@ -68,6 +71,7 @@ impl<'db> Field<'db> {
         let mut field = Field {
             name,
             ty,
+            to: None,
             metadata: FieldMetadata::default(),
         };
         let module = parsed_module(db, definition.python_file(db)).load(db);
@@ -85,6 +89,11 @@ impl<'db> Field<'db> {
         let Some(call) = value.as_call_expr() else {
             return field;
         };
+
+        field.to = call
+            .arguments
+            .find_argument_value("to", 0)
+            .map(|to| definition_expression_type(db, definition, to));
 
         if let Some(name) = call.arguments.find_keyword("name")
             && let Some(name) =
@@ -574,7 +583,9 @@ fn foreign_key_id_type<'db>(
     field: &Field<'db>,
     specialization: Option<Specialization<'db>>,
 ) -> Option<Type<'db>> {
-    let field_ty = field.ty.apply_optional_specialization(db, specialization);
+    let field_ty = refined_field_type(db, env, class, &field.name, field.ty)
+        .unwrap_or(field.ty)
+        .apply_optional_specialization(db, specialization);
     let foreign_key = KnownClass::DjangoForeignKey.try_to_class_literal(db, env)?;
     if !field_ty
         .nominal_class(db, env)?
@@ -605,6 +616,107 @@ fn foreign_key_id_type<'db>(
     } else {
         id_ty
     })
+}
+
+/// Return the model that a relation field of the model `class` refers to.
+///
+/// The related model is the first argument of the field construction. It can be a class, the
+/// name of a model in the same module, or `"self"` for the model that declares the field:
+/// ```py
+/// class Book(models.Model):
+///     author = models.ForeignKey("Author", on_delete=models.CASCADE)
+///     sequel = models.ForeignKey("self", null=True, on_delete=models.SET_NULL)
+/// ```
+///
+/// A reference with an app label, such as `"library.Author"`, is not resolved.
+fn related_model<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+    class: StaticClassLiteral<'db>,
+    field: &Field<'db>,
+) -> Option<Type<'db>> {
+    let to = field.to?;
+    let model = match to.as_string_literal() {
+        Some(reference) if reference.value(db) == "self" => {
+            return Some(Type::instance(db, env, class.default_specialization(db)));
+        }
+        Some(reference) => global_symbol(
+            db,
+            class.body_scope(db).program_file(db),
+            reference.value(db),
+        )
+        .place
+        .ignore_possibly_undefined()?,
+        None => to,
+    }
+    .to_instance_approximation(db, env)?;
+
+    let (model_class, _) = model.nominal_class(db, env)?.static_class_literal(db)?;
+    is_model(db, model_class).then_some(model)
+}
+
+/// Return a more precise type for the relation field `name` of the model `class`, if the stubs
+/// could not determine its related model.
+///
+/// `ty` is the type of the field according to the stubs. django-stubs infers the related model
+/// from the type arguments of the field class, which are unknown for a string reference and do
+/// not exist for a subclass that is not generic:
+/// ```py
+/// class TrackedForeignKey(models.ForeignKey): ...
+///
+/// class Book(models.Model):
+///     author = models.ForeignKey("Author", on_delete=models.CASCADE)
+///     editor = TrackedForeignKey(Author, on_delete=models.CASCADE)
+/// ```
+///
+/// Both fields get the type `ForeignKey[Author, Author]`.
+pub(in crate::types) fn refined_field_type<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+    class: StaticClassLiteral<'db>,
+    name: &str,
+    ty: Type<'db>,
+) -> Option<Type<'db>> {
+    let (field_class, specialization) = ty.nominal_class(db, env)?.static_class_literal(db)?;
+    // A related model that the stubs or the constructor already determined takes precedence.
+    if specialization.is_some_and(|specialization| {
+        specialization.types(db).iter().any(|ty| {
+            !ty.filter_union(db, env, |element| !element.is_none(db))
+                .is_dynamic()
+        })
+    }) || !is_foreign_key(db, field_class)
+        || !is_model(db, class)
+    {
+        return None;
+    }
+
+    let field = own_model_fields(db, class)
+        .iter()
+        .find(|field| field.name == name)?;
+    let model = related_model(db, env, class, field)?;
+    let value = if field.metadata.null {
+        UnionType::from_two_elements(db, env, model, Type::none(db, env))
+    } else {
+        model
+    };
+
+    // Specialize the field class itself, or its nearest generic base class if it is not generic.
+    let generic_class = field_class
+        .iter_mro(db, None)
+        .filter_map(ClassBase::into_class)
+        .filter_map(|base| base.static_class_literal(db))
+        .map(|(base, _)| base)
+        .find(|base| {
+            base.generic_context(db)
+                .is_some_and(|generic_context| generic_context.len(db) == 2)
+        })?;
+    Some(Type::instance(
+        db,
+        env,
+        generic_class.apply_specialization(db, |generic_context| {
+            generic_context.specialize(db, vec![value, value])
+        }),
+    ))
 }
 
 /// Synthesize `<parent>_ptr` and `<parent>_ptr_id` attributes for multi-table inheritance.

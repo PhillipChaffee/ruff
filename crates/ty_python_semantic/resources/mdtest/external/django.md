@@ -308,7 +308,7 @@ def _(chapter: Chapter):
     reveal_type(chapter.book_id)  # revealed: int
 ```
 
-A subclass that does not declare type parameters has no place to record the related model:
+So does a subclass that does not declare type parameters:
 
 ```py
 class PlainForeignKey(models.ForeignKey):
@@ -316,12 +316,14 @@ class PlainForeignKey(models.ForeignKey):
 
 class Page(models.Model):
     book = PlainForeignKey(Book, on_delete=models.CASCADE)
+    previous = PlainForeignKey("self", null=True, on_delete=models.SET_NULL)
 
 def _(page: Page):
-    # TODO: Should be `Book`.
-    reveal_type(page.book)  # revealed: Any
-    # TODO: Should be `int`.
-    reveal_type(page.book_id)  # revealed: Any
+    reveal_type(page.book)  # revealed: Book
+    reveal_type(page.book_id)  # revealed: int
+    reveal_type(page.previous)  # revealed: Page | None
+
+    page.book = None  # error: [invalid-assignment]
 ```
 
 A `ForeignKey` adds a reverse accessor to the related model. By default, its name is the lowercase
@@ -390,8 +392,8 @@ def _(review: Review):
 
 ### String references
 
-The related model can be given as a string reference. We do not resolve the string yet, but a
-foreign key declared with `null=True` is still nullable:
+The related model can be given as the name of a model in the same module, or as `"self"` for the
+model that declares the field:
 
 ```py
 from django.db import models
@@ -402,24 +404,45 @@ class Author(models.Model):
 class Book(models.Model):
     author = models.ForeignKey("Author", on_delete=models.CASCADE)
     editor = models.ForeignKey("Author", null=True, on_delete=models.SET_NULL)
+    cover = models.OneToOneField("Cover", null=True, on_delete=models.SET_NULL)
+
+class Cover(models.Model):
+    isbn = models.CharField(max_length=13, primary_key=True)
 
 def _(book: Book, author: Author):
-    # TODO: Should be `Author`.
-    reveal_type(book.author)  # revealed: Any
-    # TODO: Should be `Author | None`.
-    reveal_type(book.editor)  # revealed: Any | None
-    # TODO: Should be `Author | None`.
-    reveal_type(author.mentor)  # revealed: Any | None
+    reveal_type(book.author)  # revealed: Author
+    reveal_type(book.editor)  # revealed: Author | None
+    reveal_type(author.mentor)  # revealed: Author | None
+    reveal_type(book.cover)  # revealed: Cover | None
+
+    book.author = None  # error: [invalid-assignment]
+    book.editor = None  # ok
 ```
 
-The type of `<field>_id` should follow the primary key of the related model:
+The type of `<field>_id` follows the primary key of the related model:
 
 ```py
 def _(book: Book):
-    # TODO: Should be `int`.
-    reveal_type(book.author_id)  # revealed: Any
-    # TODO: Should be `int | None`.
-    reveal_type(book.editor_id)  # revealed: Any | None
+    reveal_type(book.author_id)  # revealed: int
+    reveal_type(book.editor_id)  # revealed: int | None
+    reveal_type(book.cover_id)  # revealed: str | None
+```
+
+We do not resolve a reference with an app label, or the name of something that is not a model. A
+foreign key declared with `null=True` is still nullable:
+
+```py
+class Review(models.Model):
+    book = models.ForeignKey("library.Book", on_delete=models.CASCADE)
+    editor = models.ForeignKey("library.Author", null=True, on_delete=models.SET_NULL)
+    missing = models.ForeignKey("Missing", on_delete=models.CASCADE)
+
+def _(review: Review):
+    # TODO: Should be `Book`.
+    reveal_type(review.book)  # revealed: Any
+    # TODO: Should be `Author | None`.
+    reveal_type(review.editor)  # revealed: Any | None
+    reveal_type(review.missing)  # revealed: Any
 ```
 
 ## Choices
