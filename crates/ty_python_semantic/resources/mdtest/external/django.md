@@ -589,4 +589,292 @@ def _(book1: Book1, book2: Book2):
     reveal_type(book2.title)  # revealed: str
 ```
 
+## Reverse accessors
+
+A `OneToOneField` adds a reverse accessor that returns the single related instance. Its default name
+is the lowercase source model name, without `_set`:
+
+```py
+from django.db import models
+
+class Author(models.Model):
+    pass
+
+class Profile(models.Model):
+    author = models.OneToOneField(Author, on_delete=models.CASCADE)
+
+def _(author: Author):
+    reveal_type(author.profile)  # revealed: Profile
+```
+
+A `related_name` on an abstract model can contain `%(class)s`, which Django replaces with the
+lowercase name of each concrete subclass:
+
+```py
+class Publication(models.Model):
+    author = models.ForeignKey(Author, on_delete=models.CASCADE, related_name="%(class)ss")
+
+    class Meta:
+        abstract = True
+
+class Magazine(Publication):
+    pass
+
+def _(author: Author):
+    reveal_type(author.magazines.first())  # revealed: Magazine | None
+```
+
+## String references
+
+A relation can name its related model with a string. `"self"` refers to the model that declares the
+field:
+
+```py
+from django.db import models
+
+class Author(models.Model):
+    pass
+
+class Book(models.Model):
+    author = models.ForeignKey("Author", on_delete=models.CASCADE)
+    editor = models.ForeignKey("Author", null=True, on_delete=models.SET_NULL, related_name="+")
+    sequel = models.ForeignKey("self", null=True, on_delete=models.SET_NULL)
+
+def _(book: Book):
+    reveal_type(book.author)  # revealed: Author
+    reveal_type(book.author_id)  # revealed: int
+    reveal_type(book.editor)  # revealed: Author | None
+    reveal_type(book.editor_id)  # revealed: int | None
+    reveal_type(book.sequel)  # revealed: Book | None
+```
+
+## Subclasses of `ForeignKey`
+
+A subclass of `ForeignKey` behaves like `ForeignKey`:
+
+```py
+from django.db import models
+
+class TrackedForeignKey(models.ForeignKey):
+    pass
+
+class Book(models.Model):
+    pass
+
+class Chapter(models.Model):
+    book = TrackedForeignKey(Book, on_delete=models.CASCADE)
+
+def _(chapter: Chapter):
+    reveal_type(chapter.book)  # revealed: Book
+```
+
+## Multi-table inheritance
+
+A model that inherits from a concrete model has a `<parent>_ptr` field that links to the parent
+model, and the parent has a reverse accessor named after the child:
+
+```py
+from django.db import models
+
+class Book(models.Model):
+    pass
+
+class Ebook(Book):
+    pass
+
+def _(book: Book, ebook: Ebook):
+    reveal_type(ebook.book_ptr)  # revealed: Book
+    reveal_type(ebook.book_ptr_id)  # revealed: int
+    reveal_type(book.ebook)  # revealed: Ebook
+```
+
+## Primary key of an abstract model's subclasses
+
+An abstract model cannot be instantiated, so a value annotated with an abstract model is always an
+instance of a concrete subclass, which has a primary key:
+
+```py
+from django.db import models
+
+class Publication(models.Model):
+    class Meta:
+        abstract = True
+
+class Magazine(Publication):
+    pass
+
+def _(publication: Publication):
+    reveal_type(publication.pk)  # revealed: int
+    reveal_type(publication.id)  # revealed: int
+```
+
+## Resetting the primary key
+
+Assigning `None` to the primary key makes the next `save()` insert a copy of the instance:
+
+```py
+from django.db import models
+
+class Book(models.Model):
+    pass
+
+def _(book: Book):
+    book.pk = None  # ok
+    book.id = None  # ok
+```
+
+## Many-to-many fields
+
+The `through` attribute of a `ManyToManyField` is the model of the intermediate table:
+
+```py
+from django.db import models
+
+class Tag(models.Model):
+    pass
+
+class Book(models.Model):
+    tags = models.ManyToManyField(Tag, through="Tagging")
+
+class Tagging(models.Model):
+    book = models.ForeignKey(Book, on_delete=models.CASCADE)
+    tag = models.ForeignKey(Tag, on_delete=models.CASCADE)
+
+reveal_type(Book.tags.through)  # revealed: type[Tagging]
+```
+
+## Managers
+
+The default manager is only available on the model class:
+
+```py
+from django.db import models
+
+class Book(models.Model):
+    pass
+
+def _(book: Book):
+    book.objects  # error: [missing-attribute]
+
+Book.nonexistent  # error: [missing-attribute]
+```
+
+`QuerySet.as_manager()` and `Manager.from_queryset()` create a manager that has a copy of the custom
+`QuerySet`'s methods:
+
+```py
+class ArticleQuerySet(models.QuerySet["Article"]):
+    def published(self) -> "ArticleQuerySet":
+        return self.filter(published=True)
+
+class Article(models.Model):
+    published = models.BooleanField(default=False)
+
+    objects = ArticleQuerySet.as_manager()
+    reviewed = models.Manager.from_queryset(ArticleQuerySet)()
+
+reveal_type(Article.objects.published())  # revealed: ArticleQuerySet
+reveal_type(Article.reviewed.published())  # revealed: ArticleQuerySet
+reveal_type(Article.objects.all().published())  # revealed: ArticleQuerySet
+```
+
+## `values()` and `values_list()`
+
+`values()` returns each row as a dictionary, and `values_list()` returns it as a tuple, or as a
+single value with `flat=True`. The types follow the named fields:
+
+```py
+from django.db import models
+
+class Article(models.Model):
+    title = models.CharField(max_length=100)
+    rating = models.IntegerField()
+
+reveal_type(Article.objects.values("title").get()["title"])  # revealed: str
+reveal_type(Article.objects.values_list("title", "rating").get())  # revealed: tuple[str, int]
+reveal_type(Article.objects.values_list("title", flat=True).get())  # revealed: str
+```
+
+## Annotations
+
+`annotate()` adds an attribute to each instance in the `QuerySet` for every keyword argument:
+
+```py
+from django.db import models
+from django.db.models.functions import Length
+
+class Article(models.Model):
+    title = models.CharField(max_length=100)
+
+article = Article.objects.annotate(title_length=Length("title")).get()
+reveal_type(article.title_length)  # revealed: int
+```
+
+## Lookups
+
+The keyword arguments of `filter()` name fields of the model. Django raises `FieldError` for an
+unknown name:
+
+```py
+from django.db import models
+
+class Book(models.Model):
+    title = models.CharField(max_length=200)
+
+Book.objects.filter(title="Example")  # ok
+Book.objects.filter(titel="Example")  # error: [unknown-argument]
+```
+
+## Choices classes
+
+The `choices` parameter accepts a subclass of Django's `Choices`, such as `TextChoices`:
+
+```py
+from django.db import models
+
+class Status(models.TextChoices):
+    DRAFT = "D", "Draft"
+    PUBLISHED = "P", "Published"
+
+class Article(models.Model):
+    status = models.CharField(max_length=1, choices=Status, default=Status.DRAFT)  # ok
+
+def _(article: Article):
+    reveal_type(article.status)  # revealed: str
+    reveal_type(article.get_status_display())  # revealed: str
+```
+
+## User model
+
+`get_user_model()` returns the model named by the `AUTH_USER_MODEL` setting, which is
+`django.contrib.auth.models.User` by default:
+
+```py
+from django.contrib.auth import get_user_model
+from django.http import HttpRequest
+
+User = get_user_model()
+
+def _(user: User):  # ok
+    reveal_type(user)  # revealed: User
+
+reveal_type(User.objects.create_user("alice"))  # revealed: User
+
+def _(request: HttpRequest):
+    reveal_type(request.user)  # revealed: User | AnonymousUser
+    request.user.is_superuser  # ok
+```
+
+## Settings
+
+`django.conf.settings` gives access to the settings of the project. Django raises `AttributeError`
+for a setting that does not exist:
+
+```py
+from django.conf import settings
+
+reveal_type(settings.DEBUG)  # revealed: bool
+settings.NOT_A_SETTING  # error: [missing-attribute]
+```
+
 [django-types]: https://github.com/sbdchd/django-types
