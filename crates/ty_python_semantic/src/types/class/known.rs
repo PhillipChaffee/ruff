@@ -172,6 +172,7 @@ pub enum KnownClass {
     DjangoLazySettings,
     DjangoBaseManager,
     DjangoQuerySet,
+    DjangoBaseForm,
     // Pydantic
     PydanticBaseModel,
     PydanticBaseSettings,
@@ -308,6 +309,7 @@ impl KnownClass {
             | Self::DjangoLazySettings
             | Self::DjangoBaseManager
             | Self::DjangoQuerySet
+            | Self::DjangoBaseForm
             | Self::PydanticBaseModel
             | Self::PydanticBaseSettings
             | Self::PydanticConfigDict
@@ -455,6 +457,7 @@ impl KnownClass {
             | Self::DjangoLazySettings
             | Self::DjangoBaseManager
             | Self::DjangoQuerySet
+            | Self::DjangoBaseForm
             | Self::PydanticBaseModel
             | Self::PydanticBaseSettings
             | Self::PydanticConfigDict
@@ -592,6 +595,7 @@ impl KnownClass {
             | KnownClass::DjangoLazySettings
             | KnownClass::DjangoBaseManager
             | KnownClass::DjangoQuerySet
+            | KnownClass::DjangoBaseForm
             | KnownClass::PydanticBaseModel
             | KnownClass::PydanticBaseSettings
             | KnownClass::PydanticConfigDict
@@ -721,6 +725,7 @@ impl KnownClass {
             | KnownClass::DjangoLazySettings
             | KnownClass::DjangoBaseManager
             | KnownClass::DjangoQuerySet
+            | KnownClass::DjangoBaseForm
             | KnownClass::PydanticBaseModel
             | KnownClass::PydanticBaseSettings
             | KnownClass::PydanticRootModel
@@ -849,6 +854,7 @@ impl KnownClass {
             | KnownClass::DjangoLazySettings
             | KnownClass::DjangoBaseManager
             | KnownClass::DjangoQuerySet
+            | KnownClass::DjangoBaseForm
             | KnownClass::PydanticBaseModel
             | KnownClass::PydanticBaseSettings
             | KnownClass::PydanticConfigDict
@@ -990,6 +996,7 @@ impl KnownClass {
             | Self::DjangoLazySettings
             | Self::DjangoBaseManager
             | Self::DjangoQuerySet
+            | Self::DjangoBaseForm
             | Self::PydanticBaseModel
             | Self::PydanticBaseSettings
             | Self::PydanticConfigDict
@@ -1120,6 +1127,7 @@ impl KnownClass {
             | KnownClass::DjangoLazySettings
             | KnownClass::DjangoBaseManager
             | KnownClass::DjangoQuerySet
+            | KnownClass::DjangoBaseForm
             | KnownClass::PydanticBaseModel
             | KnownClass::PydanticBaseSettings
             | KnownClass::PydanticConfigDict
@@ -1262,6 +1270,7 @@ impl KnownClass {
             Self::DjangoLazySettings => "LazySettings",
             Self::DjangoBaseManager => "BaseManager",
             Self::DjangoQuerySet => "QuerySet",
+            Self::DjangoBaseForm => "BaseForm",
             Self::PydanticBaseModel => "BaseModel",
             Self::PydanticBaseSettings => "BaseSettings",
             Self::PydanticConfigDict => "ConfigDict",
@@ -1708,6 +1717,7 @@ impl KnownClass {
             Self::DjangoLazySettings => KnownModule::DjangoConf,
             Self::DjangoBaseManager => KnownModule::DjangoDbModelsManager,
             Self::DjangoQuerySet => KnownModule::DjangoDbModelsQuery,
+            Self::DjangoBaseForm => KnownModule::DjangoFormsForms,
             Self::PydanticBaseModel => KnownModule::PydanticMain,
             Self::PydanticBaseSettings | Self::PydanticSettingsConfigDict => {
                 KnownModule::PydanticSettingsMain
@@ -1841,6 +1851,7 @@ impl KnownClass {
             | Self::DjangoLazySettings
             | Self::DjangoBaseManager
             | Self::DjangoQuerySet
+            | Self::DjangoBaseForm
             | Self::PydanticBaseModel
             | Self::PydanticBaseSettings
             | Self::PydanticConfigDict
@@ -1954,6 +1965,7 @@ impl KnownClass {
             "LazySettings" => &[Self::DjangoLazySettings],
             "BaseManager" => &[Self::DjangoBaseManager],
             "QuerySet" => &[Self::DjangoQuerySet],
+            "BaseForm" => &[Self::DjangoBaseForm],
             "KW_ONLY" => &[Self::KwOnly],
             "NamedTupleFallback" => &[Self::NamedTupleFallback],
             "NamedTupleLike" => &[Self::NamedTupleLike],
@@ -2089,6 +2101,7 @@ impl KnownClass {
             | Self::DjangoLazySettings
             | Self::DjangoBaseManager
             | Self::DjangoQuerySet
+            | Self::DjangoBaseForm
             | Self::PydanticBaseModel
             | Self::PydanticBaseSettings
             | Self::PydanticConfigDict

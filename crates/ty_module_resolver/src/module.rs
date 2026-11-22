@@ -297,6 +297,8 @@ pub enum KnownModule {
     DjangoDbModelsManager,
     #[strum(serialize = "django.db.models.query")]
     DjangoDbModelsQuery,
+    #[strum(serialize = "django.forms.forms")]
+    DjangoFormsForms,
     #[strum(serialize = "django.utils.choices")]
     DjangoUtilsChoices,
     #[strum(serialize = "pydantic.config")]
@@ -370,6 +372,7 @@ impl KnownModule {
             }
             Self::DjangoDbModelsManager => "django.db.models.manager",
             Self::DjangoDbModelsQuery => "django.db.models.query",
+            Self::DjangoFormsForms => "django.forms.forms",
             Self::DjangoUtilsChoices => "django.utils.choices",
             Self::PydanticConfig => "pydantic.config",
             Self::PydanticFields => "pydantic.fields",
@@ -415,6 +418,7 @@ impl KnownModule {
             | Self::DjangoDbModelsFieldsRelatedDescriptors
             | Self::DjangoDbModelsManager
             | Self::DjangoDbModelsQuery
+            | Self::DjangoFormsForms
             | Self::DjangoUtilsChoices
             | Self::PydanticConfig
             | Self::PydanticFields
