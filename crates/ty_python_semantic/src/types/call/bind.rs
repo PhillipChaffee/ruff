@@ -2018,7 +2018,7 @@ impl<'db> Bindings<'db> {
                     },
 
                     Type::BoundMethod(bound_method)
-                        if let Some(return_type) = django::queryset_method_return_type(
+                        if let Some(return_type) = django::method_return_type(
                             db,
                             env,
                             bound_method,
