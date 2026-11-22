@@ -41,6 +41,9 @@ fn inherits_from<'db>(db: &'db dyn Db, class: StaticClassLiteral<'db>, known: Kn
 }
 
 /// Returns whether `class` is a subclass of Django's `Model`.
+///
+/// This is cached, because every member lookup on every class asks it before anything else.
+#[salsa::tracked(returns(copy), cycle_initial=|_, _, _| false, heap_size=ruff_memory_usage::heap_size)]
 pub(in crate::types) fn is_model<'db>(db: &'db dyn Db, class: StaticClassLiteral<'db>) -> bool {
     class
         .iter_mro(db, None)
@@ -109,6 +112,9 @@ pub(in crate::types) fn refined_class_member<'db>(
     name: &str,
     ty: Type<'db>,
 ) -> Option<Type<'db>> {
+    if !is_model(db, class) {
+        return None;
+    }
     refined_field_type(db, env, class, name, ty).or_else(|| bound_manager(db, env, class, ty))
 }
 
