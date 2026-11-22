@@ -21,11 +21,10 @@ use crate::place_load::{
     PlaceLoadSourceKind,
 };
 use crate::reachability::ReachabilityConstraintsExtension;
-use crate::types::dedicated::django;
 use crate::types::definition_resolution::{ImportAliasResolution, resolve_definition};
 use crate::types::{
     BoundTypeVarInstance, GenericContext, KnownInstanceType, SpecialFormType, Type, TypeVarKind,
-    binding_type, definition_expression_type,
+    binding_type,
 };
 use crate::{Db, FxOrderSet, ProgramEnvironment};
 
@@ -191,21 +190,12 @@ pub(super) fn non_alias_assignment<'db>(
     if value.is_none_literal_expr() {
         return None;
     }
-    // Django code annotates with the user model through `User = get_user_model()`. The call
-    // returns an existing class, but it is the only name that the code has for the user model.
-    if let ast::Expr::Call(call) = value
-        && let Type::FunctionLiteral(function) =
-            definition_expression_type(db, definition, &call.func)
-        && django::is_get_user_model(db, function)
-    {
-        return None;
-    }
     // These forms can describe an alias even when one of its type arguments is invalid.
     // Type-expression inference diagnoses those arguments and preserves the outer type.
     if let ast::Expr::Subscript(subscript) = value
         && is_dotted_name(&subscript.value)
     {
-        let base = definition_expression_type(db, definition, &subscript.value);
+        let base = crate::types::definition_expression_type(db, definition, &subscript.value);
         if matches!(
             base,
             Type::ClassLiteral(_)
