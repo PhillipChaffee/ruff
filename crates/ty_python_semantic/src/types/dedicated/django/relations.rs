@@ -12,9 +12,9 @@ use crate::types::{ClassBase, KnownClass, Specialization, StaticClassLiteral, Ty
 use crate::{Db, ProgramEnvironment};
 
 use super::fields::{Field, model_metadata, own_model_fields};
-use super::is_model;
 use super::model::concrete_model;
 use super::project::project_models;
+use super::{inherits_from, is_model};
 
 /// Returns whether `class` is Django's `ForeignKey` or one of its subclasses.
 ///
@@ -26,10 +26,7 @@ pub(in crate::types) fn is_foreign_key<'db>(
     db: &'db dyn Db,
     class: StaticClassLiteral<'db>,
 ) -> bool {
-    class
-        .iter_mro(db, None)
-        .filter_map(ClassBase::into_class)
-        .any(|base| base.is_known(db, KnownClass::DjangoForeignKey))
+    inherits_from(db, class, KnownClass::DjangoForeignKey)
 }
 
 /// An attribute that a relation field adds to the model it refers to.
@@ -131,10 +128,7 @@ fn reverse_accessors<'db>(
                 {
                     continue;
                 }
-                let is_one_to_one = field_class
-                    .iter_mro(db, None)
-                    .filter_map(ClassBase::into_class)
-                    .any(|base| base.name(db) == "OneToOneField");
+                let is_one_to_one = inherits_from(db, field_class, KnownClass::DjangoOneToOneField);
                 let name = match field.metadata.related_name.as_deref() {
                     // A name that ends with `+` disables the reverse accessor. We do not know the
                     // app label of a model.
@@ -332,8 +326,18 @@ pub(in crate::types) fn refined_field_type<'db>(
     ty: Type<'db>,
 ) -> Option<Type<'db>> {
     let (field_class, specialization) = ty.nominal_class(db, env)?.static_class_literal(db)?;
-    if field_class.name(db) == "ManyToManyField" {
-        return refined_many_to_many_type(db, env, class, name, field_class, specialization?);
+    if inherits_from(db, field_class, KnownClass::DjangoManyToManyField) {
+        // A subclass that does not declare type parameters is refined as its generic base class.
+        let (generic_class, specialization) = if field_class.generic_context(db).is_some() {
+            (field_class, specialization)
+        } else {
+            ty.nominal_class(db, env)?
+                .iter_mro(db)
+                .filter_map(ClassBase::into_class)
+                .filter_map(|base| base.static_class_literal(db))
+                .find(|(base, _)| base.generic_context(db).is_some())?
+        };
+        return refined_many_to_many_type(db, env, class, name, generic_class, specialization?);
     }
     // A related model that the stubs or the constructor already determined takes precedence.
     if specialization.is_some_and(|specialization| {

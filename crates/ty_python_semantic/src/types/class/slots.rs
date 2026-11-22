@@ -181,6 +181,9 @@ impl InstanceDictionary {
             | KnownClass::DjangoField
             | KnownClass::DjangoDateField
             | KnownClass::DjangoForeignKey
+            | KnownClass::DjangoManyToManyField
+            | KnownClass::DjangoOneToOneField
+            | KnownClass::DjangoLazySettings
             | KnownClass::DjangoBaseManager
             | KnownClass::DjangoQuerySet
             | KnownClass::PydanticBaseModel
