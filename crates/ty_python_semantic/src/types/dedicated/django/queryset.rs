@@ -2,6 +2,7 @@
 
 use ruff_python_ast::name::Name;
 
+use crate::types::call::{Binding, CallArguments};
 use crate::types::typed_dict::{TypedDictFieldBuilder, TypedDictType};
 use crate::types::{IntersectionType, KnownClass, Type};
 use crate::{Db, ProgramEnvironment};
@@ -21,7 +22,7 @@ use crate::{Db, ProgramEnvironment};
 /// result.
 ///
 /// Returns `None`, which keeps the declared type, for a `QuerySet` class that fixes its model.
-pub(in crate::types) fn annotate_return_type<'db, 'a>(
+pub(super) fn annotate_return_type<'db, 'a>(
     db: &'db dyn Db,
     env: &ProgramEnvironment<'db>,
     declared: Type<'db>,
@@ -60,7 +61,7 @@ pub(in crate::types) fn annotate_return_type<'db, 'a>(
 
 /// The shape of the rows that a `QuerySet` method returns for the fields named in its call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::types) enum QuerySetRows {
+enum QuerySetRows {
     /// `values("title")`: a dictionary keyed by field name.
     Dict,
     /// `values_list("title", "rating")`: a tuple with one element per field.
@@ -87,7 +88,7 @@ pub(in crate::types) enum QuerySetRows {
 /// Returns `None`, which keeps the declared type, for calls that this does not model: a call
 /// without fields, a field that is not a string literal, and a lookup that spans a relation such
 /// as `"author__name"`.
-pub(in crate::types) fn queryset_rows_return_type<'db>(
+fn queryset_rows_return_type<'db>(
     db: &'db dyn Db,
     env: &ProgramEnvironment<'db>,
     declared: Type<'db>,
@@ -134,4 +135,51 @@ pub(in crate::types) fn queryset_rows_return_type<'db>(
             generic_context.specialize(db, vec![model, row])
         }),
     ))
+}
+
+/// Return the type of a call to `values()` or `values_list()` on the Django manager or queryset
+/// `receiver`. `binding` is the matched overload of the call.
+pub(super) fn values_return_type<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+    receiver: Type<'db>,
+    binding: &Binding<'db>,
+    arguments: &CallArguments<'_, 'db>,
+) -> Option<Type<'db>> {
+    let parameters = binding.signature.parameters();
+    // The matched arguments include the bound `self` argument.
+    let arguments = arguments.with_self(Some(receiver));
+    let rows = if let Some((expressions, _)) = parameters.keyword_variadic() {
+        // `values("title", n=Length("title"))` names an expression, whose type we do not model.
+        binding
+            .arguments_for_parameter(&arguments, expressions)
+            .next()
+            .is_none()
+            .then_some(QuerySetRows::Dict)?
+    } else if let Ok(None) = binding.parameter_type_by_name(db, "named", false)
+        && let Ok(flat) = binding.parameter_type_by_name(db, "flat", false)
+    {
+        match flat {
+            None => QuerySetRows::Tuple,
+            Some(flat) => {
+                if flat.as_bool_literal()? {
+                    QuerySetRows::Flat
+                } else {
+                    QuerySetRows::Tuple
+                }
+            }
+        }
+    } else {
+        return None;
+    };
+    let (fields, _) = parameters.variadic()?;
+    queryset_rows_return_type(
+        db,
+        env,
+        binding.return_type(),
+        binding
+            .arguments_for_parameter(&arguments, fields)
+            .map(|(_, ty)| ty),
+        rows,
+    )
 }

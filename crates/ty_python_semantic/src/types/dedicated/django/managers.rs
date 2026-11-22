@@ -64,7 +64,7 @@ pub(super) fn manager_queryset_method<'db>(
 /// # BookManager is Manager[Book, BookQuerySet]
 /// BookManager = models.Manager.from_queryset(BookQuerySet)
 /// ```
-pub(in crate::types) fn from_queryset_return_type<'db>(
+pub(super) fn from_queryset_return_type<'db>(
     db: &'db dyn Db,
     env: &ProgramEnvironment<'db>,
     manager: Type<'db>,
