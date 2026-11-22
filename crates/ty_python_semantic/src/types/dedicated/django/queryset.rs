@@ -1,42 +1,137 @@
 //! The rows of `values()` and `values_list()`, and the attributes that `annotate()` adds.
 
 use ruff_python_ast::name::Name;
+use ty_module_resolver::{KnownModule, file_to_module};
 
-use crate::types::call::{Binding, CallArguments};
+use crate::types::call::{Argument, Binding, CallArguments};
 use crate::types::typed_dict::{TypedDictFieldBuilder, TypedDictType};
-use crate::types::{IntersectionType, KnownClass, Type};
+use crate::types::{ClassBase, IntersectionType, KnownClass, Type};
 use crate::{Db, ProgramEnvironment};
+
+use super::inherits_from;
+
+/// Return the type of the instance that a call to the constructor of a Django aggregate such as
+/// `Count` creates, with the name that `annotate()` gives the aggregate when it is passed as a
+/// positional argument.
+///
+/// Django names such an annotation after the field of the aggregate and the lowercase name of its
+/// function, in the `default_alias` property of the aggregate:
+/// ```py
+/// Review.objects.annotate(Count("article"))  # each review has an `article__count` attribute
+/// ```
+///
+/// `annotate()` only sees the types of its arguments, so we record the name in the type of the
+/// aggregate: `instance`, the instance that the constructor creates according to the stubs, is
+/// intersected with a protocol whose `default_alias` is the name as a string literal. Django only
+/// has a name for an aggregate of a single field, without a `filter` or `order_by`, which count as
+/// further expressions.
+pub(in crate::types) fn constructed_instance_type<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+    instance: Type<'db>,
+    arguments: &CallArguments<'_, 'db>,
+) -> Option<Type<'db>> {
+    let mut field = None;
+    for argument in arguments.iter() {
+        match argument.kind() {
+            Argument::Positional if field.is_none() => field = argument.source_type(),
+            Argument::Keyword(name) if !matches!(name, "filter" | "order_by") => {}
+            _ => return None,
+        }
+    }
+    let field = field?.as_string_literal()?.value(db);
+
+    let (class, _) = instance
+        .as_nominal_instance()?
+        .class(db, env)
+        .static_class_literal(db)?;
+    if !inherits_from(db, class, KnownClass::DjangoAggregate) {
+        return None;
+    }
+    // The name of the function is the name of the aggregate class in `django.db.models.aggregates`
+    // that a user-defined aggregate inherits from. The two base classes there do not have one.
+    let function = class
+        .iter_mro(db, None)
+        .filter_map(ClassBase::into_class)
+        .map(|base| base.class_literal(db))
+        .find(|base| {
+            file_to_module(db, base.program_file(db).resolver_file(db))
+                .is_some_and(|module| module.is_known(db, KnownModule::DjangoDbModelsAggregates))
+        })?
+        .name(db);
+    if matches!(function.as_str(), "Aggregate" | "BitAggregate") {
+        return None;
+    }
+
+    let alias = format!("{field}__{}", function.to_lowercase());
+    Some(IntersectionType::from_two_elements(
+        db,
+        env,
+        instance,
+        Type::protocol_with_readonly_members(
+            db,
+            env,
+            [("default_alias", Type::string_literal(db, alias.as_str()))],
+        ),
+    ))
+}
 
 /// Add the attributes that `QuerySet.annotate()` creates to the model of the `QuerySet` it
 /// returns.
 ///
-/// `annotate()` sets an attribute on each instance for every keyword argument:
+/// `annotate()` sets an attribute on each instance for every keyword argument, and for every
+/// aggregate passed as a positional argument (see [`constructed_instance_type`]):
 /// ```py
 /// article = Article.objects.annotate(title_length=Length("title")).get()
 /// article.title_length
+///
+/// review = Review.objects.annotate(Count("article")).get()
+/// review.article__count
 /// ```
 ///
-/// `declared` is the return type according to the stubs, the same `QuerySet[Article, Article]`
-/// that the method is called on. We intersect the model with a protocol that has one member per
-/// keyword. The members have the type `Any`, because we do not infer the type of an expression's
-/// result.
+/// The declared return type is the same `QuerySet[Article, Article]` that the method is called
+/// on. We intersect the model with a protocol that has one member per annotation. The members
+/// have the type `Any`, because we do not infer the type of an expression's result.
 ///
 /// Returns `None`, which keeps the declared type, for a `QuerySet` class that fixes its model.
-pub(super) fn annotate_return_type<'db, 'a>(
+pub(super) fn annotate_return_type<'db>(
     db: &'db dyn Db,
     env: &ProgramEnvironment<'db>,
-    declared: Type<'db>,
-    keywords: impl IntoIterator<Item = &'a str>,
+    receiver: Type<'db>,
+    binding: &Binding<'db>,
+    arguments: &CallArguments<'_, 'db>,
 ) -> Option<Type<'db>> {
+    let declared = binding.return_type();
     let specialization = declared.known_specialization(db, env, KnownClass::DjangoQuerySet)?;
     let queryset = KnownClass::DjangoQuerySet.try_to_class_literal(db, env)?;
     let &[model, row] = specialization.types(db) else {
         return None;
     };
 
-    let mut annotations = keywords
+    let keywords = arguments
+        .iter()
+        .filter_map(|argument| match argument.kind() {
+            Argument::Keyword(name) => Some(name),
+            _ => None,
+        });
+    // The matched arguments include the bound `self` argument.
+    let arguments = arguments.with_self(Some(receiver));
+    let aggregates = binding
+        .signature
+        .parameters()
+        .variadic()
         .into_iter()
-        .map(|keyword| (keyword, Type::any()))
+        .flat_map(|(expressions, _)| binding.arguments_for_parameter(&arguments, expressions))
+        .filter_map(|(_, ty)| {
+            let alias = ty
+                .member(db, env, "default_alias")
+                .place
+                .ignore_possibly_undefined()?;
+            Some(alias.as_string_literal()?.value(db))
+        });
+    let mut annotations = keywords
+        .chain(aggregates)
+        .map(|name| (name, Type::any()))
         .peekable();
     annotations.peek()?;
     let annotated = IntersectionType::from_two_elements(

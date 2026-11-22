@@ -285,6 +285,8 @@ pub enum KnownModule {
     DjangoConfGlobalSettings,
     #[strum(serialize = "django.contrib.auth.models")]
     DjangoContribAuthModels,
+    #[strum(serialize = "django.db.models.aggregates")]
+    DjangoDbModelsAggregates,
     #[strum(serialize = "django.db.models.base")]
     DjangoDbModelsBase,
     #[strum(serialize = "django.db.models.enums")]
@@ -366,6 +368,7 @@ impl KnownModule {
             Self::DjangoConf => "django.conf",
             Self::DjangoConfGlobalSettings => "django.conf.global_settings",
             Self::DjangoContribAuthModels => "django.contrib.auth.models",
+            Self::DjangoDbModelsAggregates => "django.db.models.aggregates",
             Self::DjangoDbModelsBase => "django.db.models.base",
             Self::DjangoDbModelsEnums => "django.db.models.enums",
             Self::DjangoDbModelsFields => "django.db.models.fields",
@@ -415,6 +418,7 @@ impl KnownModule {
             | Self::DjangoConf
             | Self::DjangoConfGlobalSettings
             | Self::DjangoContribAuthModels
+            | Self::DjangoDbModelsAggregates
             | Self::DjangoDbModelsBase
             | Self::DjangoDbModelsEnums
             | Self::DjangoDbModelsFields

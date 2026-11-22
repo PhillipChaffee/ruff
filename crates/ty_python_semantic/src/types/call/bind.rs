@@ -3489,6 +3489,17 @@ impl<'db> Bindings<'db> {
         }
 
         self.evaluate_property_calls(db, env, call_arguments);
+
+        for constructor in self.iter_constructor_items_mut() {
+            if let Some(instance) = django::constructed_instance_type(
+                db,
+                env,
+                constructor.constructed_instance_type(),
+                call_arguments,
+            ) {
+                constructor.set_constructed_instance_type(instance);
+            }
+        }
     }
 }
 
