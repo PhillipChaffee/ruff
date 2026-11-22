@@ -1,5 +1,5 @@
 //! Managers: the methods they copy from their `QuerySet` class, `Manager.from_queryset()`, and
-//! the keywords of `create()`.
+//! the keywords of `create()` and `update()`.
 
 use ty_module_resolver::{KnownModule, file_to_module};
 use ty_python_core::place_table;
@@ -16,6 +16,26 @@ use crate::{Db, ProgramEnvironment};
 
 use super::fields::default_manager_name;
 use super::is_model;
+use super::model::init_method;
+
+/// The keyword parameters that a manager or queryset method of a model takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ModelKeywords {
+    /// The keywords of the model's constructor, which `create()` passes on.
+    Constructor,
+    /// The fields of the model, whose values `update()` sets in the database.
+    Fields,
+}
+
+impl ModelKeywords {
+    pub(super) fn of_method(name: &str) -> Option<Self> {
+        match name {
+            "create" | "acreate" => Some(Self::Constructor),
+            "update" | "aupdate" => Some(Self::Fields),
+            _ => None,
+        }
+    }
+}
 
 /// Synthesize the methods that a manager copies from its `QuerySet` class.
 ///
@@ -306,7 +326,7 @@ pub(super) fn related_manager_member<'db>(
 }
 
 /// Give `create()` and `acreate()` of a manager or queryset the keyword parameters of the model's
-/// constructor.
+/// constructor, and `update()` and `aupdate()` the fields of the model, as `keywords` says.
 ///
 /// Django's `QuerySet.create(**kwargs)` calls `self.model(**kwargs)` and saves the result, so
 /// `Book.objects.create(title="Dune")` raises the same `TypeError` as `Book(title="Dune")`. The
@@ -320,18 +340,26 @@ pub(super) fn related_manager_member<'db>(
 /// # Book.objects.create is `(*, title: str | int | Combinable = ..., id: Any = ..., pk: Any = ...) -> Book`
 /// ```
 ///
+/// `QuerySet.update(**kwargs)` sets the fields that the keywords name, and raises `FieldDoesNotExist`
+/// for another name. We give it the keyword parameters of the `__init__` that we synthesize from the
+/// fields, which leaves out the forward side of a many-to-many relation, as `update()` does, and
+/// not the parameters of an `__init__` that the model defines. If we cannot synthesize that
+/// `__init__`, for example because a base class defines its own, `update()` keeps its declared
+/// signature.
+///
 /// The other parameters of the declared method, such as `through_defaults` of a many-to-many
 /// manager, and its return type are kept. `class` is the class that declares the method, and
 /// `specialization` its type arguments, which name the model.
 ///
 /// Returns `None`, which keeps the declared method, for a method that is not Django's own, such as
 /// an override in a custom manager, and when the model is not known.
-pub(super) fn create_method<'db>(
+pub(super) fn model_keywords_method<'db>(
     db: &'db dyn Db,
     env: &ProgramEnvironment<'db>,
     class: StaticClassLiteral<'db>,
     specialization: Option<Specialization<'db>>,
     ty: Type<'db>,
+    keywords: ModelKeywords,
 ) -> Option<Type<'db>> {
     let Type::FunctionLiteral(function) = ty else {
         return None;
@@ -361,19 +389,29 @@ pub(super) fn create_method<'db>(
         base_specialization(KnownClass::DjangoQuerySet)?
     };
     let model = *base.types(db).first()?;
-    if !model
-        .nominal_class(db, env)?
-        .static_class_literal(db)
-        .is_some_and(|(model, _)| is_model(db, model))
-    {
+    let (model_class, model_specialization) =
+        model.nominal_class(db, env)?.static_class_literal(db)?;
+    if !is_model(db, model_class) {
         return None;
     }
-    let Type::BoundMethod(init) = model
-        .member(db, env, "__init__")
-        .place
-        .ignore_possibly_undefined()?
-    else {
-        return None;
+    let init = match keywords {
+        ModelKeywords::Constructor => {
+            let Type::BoundMethod(init) = model
+                .member(db, env, "__init__")
+                .place
+                .ignore_possibly_undefined()?
+            else {
+                return None;
+            };
+            init.bound_signatures(db)?
+        }
+        ModelKeywords::Fields => {
+            let Type::Callable(init) = init_method(db, env, model_class, model_specialization)?
+            else {
+                return None;
+            };
+            init.signatures(db)
+        }
     };
     let [declared] = function.signature(db).overloads.as_slice() else {
         return None;
@@ -383,7 +421,7 @@ pub(super) fn create_method<'db>(
 
     // `create()` only passes keywords on, so positional parameters of `__init__` become
     // keyword-only, and positional-only and variadic positional parameters are dropped.
-    let overloads = init.bound_signatures(db)?.iter().map(|init| {
+    let overloads = init.iter().map(|init| {
         let keywords = init
             .parameters()
             .iter()
@@ -393,6 +431,11 @@ pub(super) fn create_method<'db>(
                     .is_none_or(|name| declared_parameters.keyword_by_name(name).is_none())
             })
             .filter_map(|parameter| match parameter.kind() {
+                // The synthesized `__init__` is not bound, and its only positional parameter
+                // that is not variadic is `self`.
+                ParameterKind::PositionalOrKeyword { .. } if keywords == ModelKeywords::Fields => {
+                    None
+                }
                 ParameterKind::PositionalOrKeyword { .. } => {
                     Some(parameter.positional_or_keyword_to_keyword_only())
                 }

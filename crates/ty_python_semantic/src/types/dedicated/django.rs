@@ -25,8 +25,8 @@ pub(in crate::types) use fields::is_renamed_field;
 use fields::renamed_field;
 use lookups::{FieldNamesMethod, query_context, report_field_names, report_update_fields};
 use managers::{
-    bound_manager, create_method, from_queryset_return_type, inherited_manager,
-    manager_queryset_method, related_manager_member,
+    ModelKeywords, bound_manager, from_queryset_return_type, inherited_manager,
+    manager_queryset_method, model_keywords_method, related_manager_member,
 };
 pub(in crate::types) use model::is_automatic_primary_key_member;
 use model::{
@@ -143,7 +143,7 @@ pub(in crate::types) fn synthesized_member<'db>(
 /// Return a more precise type for the member `name` of the class `class`, specialized with
 /// `specialization`, whose type according to the stubs is `ty`: a relation field whose related
 /// model the stubs could not determine, a manager that is not yet bound to its model, or the
-/// `create()` method of a manager or queryset.
+/// `create()` and `update()` methods of a manager or queryset.
 pub(in crate::types) fn refined_class_member<'db>(
     db: &'db dyn Db,
     env: &ProgramEnvironment<'db>,
@@ -152,8 +152,8 @@ pub(in crate::types) fn refined_class_member<'db>(
     name: &str,
     ty: Type<'db>,
 ) -> Option<Type<'db>> {
-    if matches!(name, "create" | "acreate")
-        && let Some(method) = create_method(db, env, class, specialization, ty)
+    if let Some(keywords) = ModelKeywords::of_method(name)
+        && let Some(method) = model_keywords_method(db, env, class, specialization, ty, keywords)
     {
         return Some(method);
     }
