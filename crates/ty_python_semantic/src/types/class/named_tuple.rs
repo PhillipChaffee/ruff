@@ -9,8 +9,8 @@ use crate::{
     types::{
         BindingContext, BoundTypeVarInstance, ClassBase, ClassLiteral, ClassType, GenericContext,
         KnownClass, KnownInstanceType, MemberLookupPolicy, Parameter, Parameters,
-        PropertyInstanceType, SelfTypeVarOrigin, Signature, SubclassOfType, Type, TypeContext,
-        TypeMapping,
+        PropertyInstanceType, SelfTypeVarOrigin, Signature, StaticClassLiteral, SubclassOfType,
+        Type, TypeContext, TypeMapping,
         class::{DynamicClassHeaderAnchor, DynamicClassScopeOffset, dynamic_class_header_range},
         definition_expression_type,
         member::Member,
@@ -198,7 +198,8 @@ impl<'db> DynamicNamedTupleLiteral<'db> {
         match self.anchor(db) {
             DynamicNamedTupleAnchor::CollectionsDefinition { definition, .. }
             | DynamicNamedTupleAnchor::TypingDefinition(definition) => Some(*definition),
-            DynamicNamedTupleAnchor::ScopeOffset { .. } => None,
+            DynamicNamedTupleAnchor::ScopeOffset { .. }
+            | DynamicNamedTupleAnchor::Implicit { .. } => None,
         }
     }
 
@@ -208,6 +209,7 @@ impl<'db> DynamicNamedTupleLiteral<'db> {
             DynamicNamedTupleAnchor::CollectionsDefinition { definition, .. }
             | DynamicNamedTupleAnchor::TypingDefinition(definition) => definition.scope(db),
             DynamicNamedTupleAnchor::ScopeOffset { scope, .. } => *scope,
+            DynamicNamedTupleAnchor::Implicit { owner, .. } => owner.body_scope(db),
         }
     }
 
@@ -216,7 +218,8 @@ impl<'db> DynamicNamedTupleLiteral<'db> {
         Type::instance(db, env, ClassType::NonGeneric(self.into()))
     }
 
-    /// Returns the range of the namedtuple call expression.
+    /// Returns the range of the namedtuple call expression, or of the header of the owner class
+    /// for an implicit namedtuple.
     pub(crate) fn header_range(self, db: &'db dyn Db) -> TextRange {
         let anchor = match self.anchor(db) {
             DynamicNamedTupleAnchor::CollectionsDefinition { definition, .. }
@@ -226,6 +229,7 @@ impl<'db> DynamicNamedTupleLiteral<'db> {
             DynamicNamedTupleAnchor::ScopeOffset { offset, .. } => {
                 DynamicClassHeaderAnchor::ScopeOffset(*offset)
             }
+            DynamicNamedTupleAnchor::Implicit { owner, .. } => return owner.header_range(db),
         };
         dynamic_class_header_range(db, self.scope(db), anchor)
     }
@@ -468,7 +472,8 @@ impl<'db> DynamicNamedTupleLiteral<'db> {
 
         match self.anchor(db) {
             DynamicNamedTupleAnchor::CollectionsDefinition { spec, .. }
-            | DynamicNamedTupleAnchor::ScopeOffset { spec, .. } => *spec,
+            | DynamicNamedTupleAnchor::ScopeOffset { spec, .. }
+            | DynamicNamedTupleAnchor::Implicit { spec, .. } => *spec,
             DynamicNamedTupleAnchor::TypingDefinition(definition) => deferred_spec(db, *definition),
         }
     }
@@ -542,6 +547,25 @@ pub enum DynamicNamedTupleAnchor<'db> {
         offset: DynamicClassScopeOffset,
         spec: NamedTupleSpec<'db>,
     },
+
+    /// A namedtuple that a library creates at runtime for the class `owner`, without a call in
+    /// the source. For example, Django returns the rows of `values_list(..., named=True)` as
+    /// instances of a namedtuple with one field per named field of the model:
+    ///
+    /// ```python
+    /// class Book(models.Model):
+    ///     title = models.CharField(max_length=200)
+    ///
+    /// row = Book.objects.values_list("title", named=True).get()  # a namedtuple `Row`
+    /// row.title  # str
+    /// ```
+    ///
+    /// The class is identified by its `owner`, its name and its `spec`, and its header is the
+    /// header of the `owner` class.
+    Implicit {
+        owner: StaticClassLiteral<'db>,
+        spec: NamedTupleSpec<'db>,
+    },
 }
 
 impl<'db> DynamicNamedTupleAnchor<'db> {
@@ -565,6 +589,10 @@ impl<'db> DynamicNamedTupleAnchor<'db> {
             } => Some(Self::ScopeOffset {
                 scope: *scope,
                 offset: *offset,
+                spec: spec.recursive_type_normalized_impl(db, env, div, nested)?,
+            }),
+            Self::Implicit { owner, spec } => Some(Self::Implicit {
+                owner: *owner,
                 spec: spec.recursive_type_normalized_impl(db, env, div, nested)?,
             }),
         }

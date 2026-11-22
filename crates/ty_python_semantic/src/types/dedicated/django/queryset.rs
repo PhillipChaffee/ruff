@@ -6,9 +6,13 @@ use ty_module_resolver::{KnownModule, file_to_module};
 
 use crate::place::known_module_symbol;
 use crate::types::call::{Argument, Binding, CallArguments};
+use crate::types::class::{
+    ClassLiteral, DynamicNamedTupleAnchor, DynamicNamedTupleLiteral, NamedTupleField,
+    NamedTupleSpec,
+};
 use crate::types::type_alias::TypeAliasType;
 use crate::types::typed_dict::{TypedDictFieldBuilder, TypedDictType};
-use crate::types::{ClassBase, IntersectionType, KnownClass, Specialization, Type};
+use crate::types::{ClassBase, ClassType, IntersectionType, KnownClass, Specialization, Type};
 use crate::{Db, ProgramEnvironment};
 
 use super::{inherits_from, is_model};
@@ -358,6 +362,8 @@ enum QuerySetRows {
     Tuple,
     /// `values_list("title", flat=True)`: the value of the single field.
     Flat,
+    /// `values_list("title", "rating", named=True)`: a named tuple with one field per field.
+    Named,
 }
 
 /// Infer the row type of `QuerySet.values()` and `QuerySet.values_list()` from the fields named
@@ -373,6 +379,7 @@ enum QuerySetRows {
 /// Article.objects.values("title")  # rows are a `TypedDict` with a `title` key of type `str`
 /// Article.objects.values_list("title", "rating")  # rows are `tuple[str, int]`
 /// Article.objects.values_list("title", flat=True)  # rows are `str`
+/// Article.objects.values_list("title", named=True)  # rows are a named tuple with a `title: str`
 /// ```
 ///
 /// Returns `None`, which keeps the declared type, for calls that this does not model: a call
@@ -414,6 +421,32 @@ fn queryset_rows_return_type<'db>(
         }
         (QuerySetRows::Flat, [(_, ty)]) => *ty,
         (QuerySetRows::Flat, _) => return None,
+        (QuerySetRows::Named, _) => {
+            // Django creates a namedtuple class named `Row` for the names of each query.
+            let (owner, _) = model.nominal_class(db, env)?.static_class_literal(db)?;
+            let fields = columns
+                .into_iter()
+                .map(|(name, ty)| NamedTupleField {
+                    name,
+                    ty,
+                    default: None,
+                    definition: None,
+                })
+                .collect();
+            let row = DynamicNamedTupleLiteral::new(
+                db,
+                Name::new_static("Row"),
+                DynamicNamedTupleAnchor::Implicit {
+                    owner,
+                    spec: NamedTupleSpec::known(db, fields),
+                },
+            );
+            Type::instance(
+                db,
+                env,
+                ClassType::NonGeneric(ClassLiteral::DynamicNamedTuple(row)),
+            )
+        }
     };
 
     Some(Type::instance(
@@ -444,18 +477,18 @@ pub(super) fn values_return_type<'db>(
             .next()
             .is_none()
             .then_some(QuerySetRows::Dict)?
-    } else if let Ok(None) = binding.parameter_type_by_name(db, "named", false)
-        && let Ok(flat) = binding.parameter_type_by_name(db, "flat", false)
+    } else if let Ok(flat) = binding.parameter_type_by_name(db, "flat", false)
+        && let Ok(named) = binding.parameter_type_by_name(db, "named", false)
     {
-        match flat {
-            None => QuerySetRows::Tuple,
-            Some(flat) => {
-                if flat.as_bool_literal()? {
-                    QuerySetRows::Flat
-                } else {
-                    QuerySetRows::Tuple
-                }
-            }
+        // An argument that is not a `bool` literal leaves the shape of the rows unknown.
+        let is_set =
+            |argument: Option<Type<'db>>| argument.map_or(Some(false), Type::as_bool_literal);
+        match (is_set(flat)?, is_set(named)?) {
+            (false, false) => QuerySetRows::Tuple,
+            (true, false) => QuerySetRows::Flat,
+            (false, true) => QuerySetRows::Named,
+            // Django raises a `TypeError`.
+            (true, true) => return None,
         }
     } else {
         return None;
