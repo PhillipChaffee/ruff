@@ -1,7 +1,7 @@
 //! The rows of `values()` and `values_list()`, and the attributes that `annotate()`,
 //! `prefetch_related()` and django-stubs-ext's `WithAnnotations` add to model instances.
 
-use ruff_python_ast::name::Name;
+use ruff_python_ast::{self as ast, name::Name};
 use ty_module_resolver::{KnownModule, file_to_module};
 
 use crate::place::known_module_symbol;
@@ -10,6 +10,8 @@ use crate::types::class::{
     ClassLiteral, DynamicNamedTupleAnchor, DynamicNamedTupleLiteral, NamedTupleField,
     NamedTupleSpec,
 };
+use crate::types::context::InferContext;
+use crate::types::diagnostic::INVALID_ARGUMENT_TYPE;
 use crate::types::type_alias::TypeAliasType;
 use crate::types::typed_dict::{TypedDictFieldBuilder, TypedDictType};
 use crate::types::{ClassBase, ClassType, IntersectionType, KnownClass, Specialization, Type};
@@ -503,4 +505,41 @@ pub(super) fn values_return_type<'db>(
             .map(|(_, ty)| ty),
         rows,
     )
+}
+
+/// Report a combination of the arguments of `values_list()` that Django rejects with a
+/// `TypeError`: `flat=True` with more than one field, and `flat=True` with `named=True`.
+/// ```py
+/// Article.objects.values_list("title", "rating", flat=True)
+/// Article.objects.values_list("title", flat=True, named=True)
+/// ```
+///
+/// `binding` is the matched overload of the call.
+pub(super) fn report_values_list_arguments<'db>(
+    context: &InferContext<'db, '_>,
+    arguments: &ast::Arguments,
+    binding: &Binding<'db>,
+) {
+    let db = context.db();
+    let is_true = |name: &str| {
+        binding
+            .parameter_type_by_name(db, name, false)
+            .is_ok_and(|ty| ty.and_then(Type::as_bool_literal) == Some(true))
+    };
+    if !is_true("flat") {
+        return;
+    }
+    let Some(flat) = arguments.find_keyword("flat") else {
+        return;
+    };
+    let message = if is_true("named") {
+        "'flat' and 'named' can't be used together"
+    } else if arguments.args.len() > 1 && !arguments.args.iter().any(ast::Expr::is_starred_expr) {
+        "'flat' is not valid when values_list is called with more than one field"
+    } else {
+        return;
+    };
+    if let Some(builder) = context.report_lint(&INVALID_ARGUMENT_TYPE, flat) {
+        builder.into_diagnostic(message);
+    }
 }

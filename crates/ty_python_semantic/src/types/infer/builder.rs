@@ -65,7 +65,7 @@ use crate::types::class::{
 };
 use crate::types::constraints::{CandidateSolutions, ConstraintSetBuilder, Solutions};
 use crate::types::context::{InferContext, InferContextResult};
-use crate::types::dedicated::pydantic;
+use crate::types::dedicated::{django, pydantic};
 use crate::types::diagnostic::{
     self, ABSTRACT_CLASS_INSTANTIATION, AssignmentDeclaration, CONFLICTING_DECLARATIONS,
     CYCLIC_TYPE_ALIAS_DEFINITION, DYNAMIC_FUNCTION_DECORATOR_RETURN, GeneratorMismatchKind,
@@ -10292,6 +10292,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         if let Some(class) = class {
             pydantic::report_discarded_extra_arguments(&self.context, class, arguments, &bindings);
         }
+        django::report_queryset_call(&self.context, arguments, &bindings);
 
         self.check_type_observations(&bindings, revealed_type, call_expression);
 
