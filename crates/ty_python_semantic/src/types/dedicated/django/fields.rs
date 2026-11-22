@@ -78,58 +78,31 @@ impl<'db> Field<'db> {
             .arguments
             .find_argument_value("to", 0)
             .map(|to| definition_expression_type(db, definition, to));
-        field.through = call
-            .arguments
-            .find_keyword("through")
-            .map(|through| definition_expression_type(db, definition, &through.value));
+        // The type of the keyword argument `name`, if the call passes it.
+        let keyword = |name: &str| {
+            call.arguments
+                .find_keyword(name)
+                .map(|keyword| definition_expression_type(db, definition, &keyword.value))
+        };
+        let is_true = |name: &str| keyword(name).and_then(Type::as_bool_literal) == Some(true);
+        let string = |name: &str| {
+            keyword(name)
+                .and_then(Type::as_string_literal)
+                .map(|value| Name::new(value.value(db)))
+        };
 
-        if let Some(name) = call.arguments.find_keyword("name")
-            && let Some(name) =
-                definition_expression_type(db, definition, &name.value).as_string_literal()
-            && !name.value(db).is_empty()
+        field.through = keyword("through");
+        if let Some(name) = string("name")
+            && !name.is_empty()
         {
-            field.name = Name::new(name.value(db));
+            field.name = name;
         }
-
-        field.metadata.primary_key =
-            call.arguments
-                .find_keyword("primary_key")
-                .is_some_and(|primary_key| {
-                    definition_expression_type(db, definition, &primary_key.value).as_bool_literal()
-                        == Some(true)
-                });
-        field.metadata.has_choices =
-            call.arguments
-                .find_keyword("choices")
-                .is_some_and(|choices| {
-                    !definition_expression_type(db, definition, &choices.value).is_none(db)
-                });
-        field.metadata.null = call.arguments.find_keyword("null").is_some_and(|null| {
-            definition_expression_type(db, definition, &null.value).as_bool_literal() == Some(true)
-        });
-        field.metadata.to_field = call
-            .arguments
-            .find_keyword("to_field")
-            .and_then(|to_field| {
-                definition_expression_type(db, definition, &to_field.value)
-                    .as_string_literal()
-                    .map(|name| Name::new(name.value(db)))
-            });
-        field.metadata.related_name =
-            call.arguments
-                .find_keyword("related_name")
-                .and_then(|related_name| {
-                    definition_expression_type(db, definition, &related_name.value)
-                        .as_string_literal()
-                        .map(|name| Name::new(name.value(db)))
-                });
-        field.metadata.parent_link =
-            call.arguments
-                .find_keyword("parent_link")
-                .is_some_and(|parent_link| {
-                    definition_expression_type(db, definition, &parent_link.value).as_bool_literal()
-                        == Some(true)
-                });
+        field.metadata.primary_key = is_true("primary_key");
+        field.metadata.has_choices = keyword("choices").is_some_and(|choices| !choices.is_none(db));
+        field.metadata.null = is_true("null");
+        field.metadata.to_field = string("to_field");
+        field.metadata.related_name = string("related_name");
+        field.metadata.parent_link = is_true("parent_link");
         field
     }
 }
