@@ -2,7 +2,12 @@
 //!
 //! The members that Django creates at runtime are synthesized by [`synthesized_member`].
 
-use crate::types::call::{Binding, CallArguments};
+use ruff_python_ast as ast;
+use ty_module_resolver::file_to_module;
+
+use crate::types::call::{Binding, Bindings, CallArguments};
+use crate::types::context::InferContext;
+use crate::types::function::FunctionType;
 use crate::types::{
     BoundMethodType, ClassBase, KnownClass, Specialization, StaticClassLiteral, Type,
 };
@@ -28,7 +33,10 @@ use model::{
 };
 use project::setting;
 pub(in crate::types) use project::type_alias_override;
-use queryset::{annotate_return_type, prefetch_related_return_type, values_return_type};
+use queryset::{
+    annotate_return_type, prefetch_related_return_type, report_values_list_arguments,
+    values_return_type,
+};
 pub(in crate::types) use queryset::{constructed_instance_type, type_alias_value_override};
 use relations::reverse_accessor;
 pub(in crate::types) use relations::{foreign_key_model_type, is_foreign_key};
@@ -174,17 +182,7 @@ pub(in crate::types) fn method_return_type<'db>(
 ) -> Option<Type<'db>> {
     let function = bound_method.function(db)?;
     let receiver = bound_method.self_instance(db);
-    let is_django_receiver = || {
-        receiver.nominal_class(db, env).is_some_and(|class| {
-            class
-                .iter_mro(db)
-                .filter_map(ClassBase::into_class)
-                .any(|base| {
-                    base.is_known(db, KnownClass::DjangoQuerySet)
-                        || base.is_known(db, KnownClass::DjangoBaseManager)
-                })
-        })
-    };
+    let is_django_receiver = || is_queryset_or_manager(db, env, receiver);
     match function.name(db).as_str() {
         "from_queryset" => from_queryset_return_type(db, env, receiver, binding),
         "annotate" if is_django_receiver() => {
@@ -204,5 +202,62 @@ pub(in crate::types) fn method_return_type<'db>(
             get_model_return_type(db, env, binding)
         }
         _ => None,
+    }
+}
+
+/// Returns whether `ty` is an instance of one of Django's `QuerySet` or manager classes.
+fn is_queryset_or_manager<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+    ty: Type<'db>,
+) -> bool {
+    ty.nominal_class(db, env).is_some_and(|class| {
+        class
+            .iter_mro(db)
+            .filter_map(ClassBase::into_class)
+            .any(|base| {
+                base.is_known(db, KnownClass::DjangoQuerySet)
+                    || base.is_known(db, KnownClass::DjangoBaseManager)
+            })
+    })
+}
+
+/// Returns whether Django declares `function`, rather than a class of the project that overrides
+/// a method of Django.
+fn is_django_function<'db>(db: &'db dyn Db, function: FunctionType<'db>) -> bool {
+    file_to_module(db, function.program_file(db).resolver_file(db))
+        .is_some_and(|module| module.name(db).first_component() == "django")
+}
+
+/// Report the arguments of a call to a method of a Django manager or queryset that Django rejects
+/// at runtime, although the stubs accept their types. `arguments` are the arguments of the call,
+/// and `bindings` the result of binding them.
+///
+/// This only checks calls of the methods that Django declares, on Django's managers and
+/// querysets.
+pub(in crate::types) fn report_queryset_call<'db>(
+    context: &InferContext<'db, '_>,
+    arguments: &ast::Arguments,
+    bindings: &Bindings<'db>,
+) {
+    let db = context.db();
+    let env = context.program_environment();
+    for binding in bindings.iter_flat() {
+        let Type::BoundMethod(bound_method) = binding.callable_type else {
+            continue;
+        };
+        let Some(function) = bound_method.function(db) else {
+            continue;
+        };
+        if function.name(db).as_str() != "values_list"
+            || !is_django_function(db, function)
+            || !is_queryset_or_manager(db, env, bound_method.self_instance(db))
+        {
+            continue;
+        }
+        let Some((_, overload)) = binding.matching_overloads().next() else {
+            continue;
+        };
+        report_values_list_arguments(context, arguments, overload);
     }
 }
