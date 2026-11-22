@@ -23,6 +23,7 @@ mod relations;
 
 pub(in crate::types) use fields::is_renamed_field;
 use fields::renamed_field;
+use lookups::{FieldNamesMethod, query_context, report_field_names, report_update_fields};
 use managers::{
     bound_manager, create_method, from_queryset_return_type, inherited_manager,
     manager_queryset_method, related_manager_member,
@@ -164,7 +165,7 @@ pub(in crate::types) fn refined_class_member<'db>(
 
 /// Return the type of a call to a method of a Django manager, queryset or app registry, for the
 /// methods whose result the stubs cannot express: `Manager.from_queryset()`, `annotate()`,
-/// `prefetch_related()`, `values()`, `values_list()` and `Apps.get_model()`. `binding` is the
+/// `alias()`, `prefetch_related()`, `values()`, `values_list()` and `Apps.get_model()`. `binding` is the
 /// matched overload of the call.
 ///
 /// The methods other than `from_queryset()` are only refined when they are called on one of
@@ -186,7 +187,7 @@ pub(in crate::types) fn method_return_type<'db>(
     let is_django_receiver = || is_queryset_or_manager(db, env, receiver);
     match function.name(db).as_str() {
         "from_queryset" => from_queryset_return_type(db, env, receiver, binding),
-        "annotate" if is_django_receiver() => {
+        "annotate" | "alias" if is_django_receiver() => {
             annotate_return_type(db, env, receiver, binding, arguments)
         }
         "prefetch_related" if is_django_receiver() => {
@@ -230,19 +231,20 @@ fn is_django_function<'db>(db: &'db dyn Db, function: FunctionType<'db>) -> bool
         .is_some_and(|module| module.name(db).first_component() == "django")
 }
 
-/// Report the arguments of a call to a method of a Django manager or queryset that Django rejects
-/// at runtime, although the stubs accept their types. `arguments` are the arguments of the call,
-/// and `bindings` the result of binding them.
+/// Report the arguments of a call to a Django method that Django rejects at runtime, although the
+/// stubs accept their types: the arguments of `values_list()`, and the field names that
+/// `order_by()`, `only()`, `defer()`, `select_related()` and `save(update_fields=...)` cannot
+/// resolve. `bindings` is the result of binding the arguments of `call_expression`.
 ///
-/// This only checks calls of the methods that Django declares, on Django's managers and
-/// querysets.
+/// This only checks calls of the methods that Django declares.
 pub(in crate::types) fn report_queryset_call<'db>(
     context: &InferContext<'db, '_>,
-    arguments: &ast::Arguments,
+    call_expression: &ast::ExprCall,
     bindings: &Bindings<'db>,
 ) {
     let db = context.db();
     let env = context.program_environment();
+    let arguments = &call_expression.arguments;
     for binding in bindings.iter_flat() {
         let Type::BoundMethod(bound_method) = binding.callable_type else {
             continue;
@@ -250,15 +252,29 @@ pub(in crate::types) fn report_queryset_call<'db>(
         let Some(function) = bound_method.function(db) else {
             continue;
         };
-        if function.name(db).as_str() != "values_list"
+        let name = function.name(db).as_str();
+        let field_names_method = FieldNamesMethod::from_name(name);
+        if !(field_names_method.is_some() || matches!(name, "values_list" | "save" | "asave"))
             || !is_django_function(db, function)
-            || !is_queryset_or_manager(db, env, bound_method.self_instance(db))
         {
             continue;
         }
-        let Some((_, overload)) = binding.matching_overloads().next() else {
-            continue;
-        };
-        report_values_list_arguments(context, arguments, overload);
+        let receiver = bound_method.self_instance(db);
+        if let Some(method) = field_names_method {
+            if let Some(query) = query_context(db, env, receiver) {
+                report_field_names(context, method, &query, arguments);
+            }
+        } else if name == "values_list" {
+            if is_queryset_or_manager(db, env, receiver)
+                && let Some((_, overload)) = binding.matching_overloads().next()
+            {
+                report_values_list_arguments(context, arguments, overload);
+            }
+        } else if let Type::NominalInstance(instance) = receiver
+            && let Some((model, _)) = instance.class(db, env).static_class_literal(db)
+            && is_model(db, model)
+        {
+            report_update_fields(context, model, arguments);
+        }
     }
 }

@@ -10292,7 +10292,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         if let Some(class) = class {
             pydantic::report_discarded_extra_arguments(&self.context, class, arguments, &bindings);
         }
-        django::report_queryset_call(&self.context, arguments, &bindings);
+        django::report_queryset_call(&self.context, call_expression, &bindings);
 
         self.check_type_observations(&bindings, revealed_type, call_expression);
 

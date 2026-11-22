@@ -17,7 +17,7 @@ use crate::types::typed_dict::{TypedDictFieldBuilder, TypedDictType};
 use crate::types::{ClassBase, ClassType, IntersectionType, KnownClass, Specialization, Type};
 use crate::{Db, ProgramEnvironment};
 
-use super::lookups::{LOOKUP_SEP, resolve_path};
+use super::lookups::{LOOKUP_SEP, QueryContext, resolve_path};
 use super::{inherits_from, is_model};
 
 /// Return the type of the instance that a call to the constructor of a Django aggregate such as
@@ -86,8 +86,8 @@ pub(in crate::types) fn constructed_instance_type<'db>(
     ))
 }
 
-/// Add the attributes that `QuerySet.annotate()` creates to the model of the `QuerySet` it
-/// returns.
+/// Add the attributes that `QuerySet.annotate()` or `QuerySet.alias()` creates to the model of
+/// the `QuerySet` it returns.
 ///
 /// `annotate()` sets an attribute on each instance for every keyword argument, and for every
 /// aggregate passed as a positional argument (see [`constructed_instance_type`]):
@@ -98,6 +98,14 @@ pub(in crate::types) fn constructed_instance_type<'db>(
 /// review = Review.objects.annotate(Count("article")).get()
 /// review.article__count
 /// ```
+///
+/// `alias()` only adds the names to the query, where other methods can use them:
+/// ```py
+/// Article.objects.alias(title_length=Length("title")).order_by("title_length")
+/// ```
+///
+/// We treat both alike, so that the names of the query are part of its type, although an instance
+/// has no attribute for an alias.
 ///
 /// The attributes have the type `Any`, because we do not infer the type of an expression's
 /// result.
@@ -410,7 +418,7 @@ fn queryset_rows_return_type<'db>(
             let name = field.as_string_literal()?.value(db);
             let ty = if name.contains(LOOKUP_SEP) {
                 let (model, _) = model.nominal_class(db, env)?.static_class_literal(db)?;
-                resolve_path(db, model, name).value_type(db, env)?
+                resolve_path(db, &QueryContext::of_model(model), name).value_type(db, env)?
             } else {
                 // The member of the model, which can also be an annotation.
                 model

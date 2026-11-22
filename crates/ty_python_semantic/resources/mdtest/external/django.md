@@ -2479,4 +2479,35 @@ from django.contrib.auth import get_user_model
 reveal_type(get_user_model())  # revealed: type[AbstractUser]
 ```
 
+## Field names after annotations
+
+`annotate()` and `alias()` add names that the field names of later queryset methods can use, also
+when the queryset is stored in a variable:
+
+```py
+from django.db import models
+from django.db.models import Count
+
+class Author(models.Model):
+    name = models.CharField(max_length=100)
+
+class Book(models.Model):
+    title = models.CharField(max_length=200)
+    author = models.ForeignKey(Author, on_delete=models.CASCADE)
+
+annotated = Book.objects.annotate(n=Count("author"))
+annotated.order_by("-n")  # ok
+annotated.order_by("nn")  # error: [invalid-argument-type]
+
+aliased = Book.objects.alias(n=Count("author"))
+aliased.order_by("n")  # ok
+```
+
+We do not see the names that `extra()` adds, so we do not check the names after it:
+
+```py
+extended = Book.objects.extra(select={"is_recent": "id > 100"})
+extended.order_by("is_recent")  # ok
+```
+
 [django-stubs]: https://github.com/typeddjango/django-stubs
