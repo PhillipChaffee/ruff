@@ -89,11 +89,8 @@ pub(in crate::types) fn constructed_instance_type<'db>(
 /// review.article__count
 /// ```
 ///
-/// The declared return type is the same `QuerySet[Article, Article]` that the method is called
-/// on. We intersect the model with a protocol that has one member per annotation. The members
-/// have the type `Any`, because we do not infer the type of an expression's result.
-///
-/// Returns `None`, which keeps the declared type, for a `QuerySet` class that fixes its model.
+/// The attributes have the type `Any`, because we do not infer the type of an expression's
+/// result.
 pub(super) fn annotate_return_type<'db>(
     db: &'db dyn Db,
     env: &ProgramEnvironment<'db>,
@@ -101,13 +98,6 @@ pub(super) fn annotate_return_type<'db>(
     binding: &Binding<'db>,
     arguments: &CallArguments<'_, 'db>,
 ) -> Option<Type<'db>> {
-    let declared = binding.return_type();
-    let specialization = declared.known_specialization(db, env, KnownClass::DjangoQuerySet)?;
-    let queryset = KnownClass::DjangoQuerySet.try_to_class_literal(db, env)?;
-    let &[model, row] = specialization.types(db) else {
-        return None;
-    };
-
     let keywords = arguments
         .iter()
         .filter_map(|argument| match argument.kind() {
@@ -129,26 +119,85 @@ pub(super) fn annotate_return_type<'db>(
                 .ignore_possibly_undefined()?;
             Some(alias.as_string_literal()?.value(db))
         });
-    let mut annotations = keywords
-        .chain(aggregates)
-        .map(|name| (name, Type::any()))
-        .peekable();
-    annotations.peek()?;
-    let annotated = IntersectionType::from_two_elements(
+    annotated_queryset(
+        db,
+        env,
+        binding.return_type(),
+        keywords.chain(aggregates).map(|name| (name, Type::any())),
+    )
+}
+
+/// Add `attributes` to the instances of the `QuerySet` type `declared`.
+///
+/// `declared` is the type that a `QuerySet` method returns according to the stubs, such as
+/// `QuerySet[Article, Article]`. We return a `QuerySet` whose model is annotated with the
+/// attributes (see [`annotated_model`]). The rows are annotated too, unless `values()` or
+/// `values_list()` changed their shape.
+///
+/// For a custom `QuerySet` class, we return the intersection of the class with the annotated
+/// `QuerySet`, which keeps the methods of the class:
+/// ```py
+/// class ArticleQuerySet(models.QuerySet["Article"]):
+///     def published(self) -> "ArticleQuerySet": ...
+///
+/// # `ArticleQuerySet & QuerySet[Article & <title_length>, Article & <title_length>]`
+/// Article.objects.annotate(title_length=Length("title"))
+/// ```
+///
+/// Returns `None`, which keeps the declared type, when there are no attributes.
+fn annotated_queryset<'db, 'a>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+    declared: Type<'db>,
+    attributes: impl IntoIterator<Item = (&'a str, Type<'db>)>,
+) -> Option<Type<'db>> {
+    let class = declared.nominal_class(db, env)?;
+    let (_, specialization) = class
+        .iter_mro(db)
+        .filter_map(ClassBase::into_class)
+        .filter_map(|base| base.static_class_literal(db))
+        .find(|(base, _)| base.is_known(db, KnownClass::DjangoQuerySet))?;
+    let &[model, row] = specialization?.types(db) else {
+        return None;
+    };
+    let annotated = annotated_model(db, env, model, attributes)?;
+
+    let queryset = Type::instance(
+        db,
+        env,
+        KnownClass::DjangoQuerySet
+            .try_to_class_literal(db, env)?
+            .apply_specialization(db, |generic_context| {
+                let row = if row == model { annotated } else { row };
+                generic_context.specialize(db, vec![annotated, row])
+            }),
+    );
+    if class.is_known(db, KnownClass::DjangoQuerySet) {
+        Some(queryset)
+    } else {
+        Some(IntersectionType::from_two_elements(
+            db, env, declared, queryset,
+        ))
+    }
+}
+
+/// Add `attributes` to the model instance type `model`, as the intersection of the model with a
+/// protocol that has one read-only member per attribute.
+///
+/// Returns `None` when there are no attributes.
+fn annotated_model<'db, 'a>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+    model: Type<'db>,
+    attributes: impl IntoIterator<Item = (&'a str, Type<'db>)>,
+) -> Option<Type<'db>> {
+    let mut attributes = attributes.into_iter().peekable();
+    attributes.peek()?;
+    Some(IntersectionType::from_two_elements(
         db,
         env,
         model,
-        Type::protocol_with_readonly_members(db, env, annotations),
-    );
-
-    Some(Type::instance(
-        db,
-        env,
-        queryset.apply_specialization(db, |generic_context| {
-            // Rows are model instances unless `values()` or `values_list()` changed their shape.
-            let row = if row == model { annotated } else { row };
-            generic_context.specialize(db, vec![annotated, row])
-        }),
+        Type::protocol_with_readonly_members(db, env, attributes),
     ))
 }
 
