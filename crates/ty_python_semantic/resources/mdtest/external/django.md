@@ -1300,6 +1300,53 @@ name as an invalid call to that method:
 Book.nonexistent  # error: [invalid-attribute-access]
 ```
 
+## Managers declared on the model
+
+A manager declared in the class body belongs to the model, like the default manager. Django binds it
+to the model when it creates the class, even when the manager class does not name the model:
+
+```py
+from django.db import models
+
+class BookManager(models.Manager):  # error: [missing-type-argument]
+    pass
+
+class Book(models.Model):
+    title = models.CharField(max_length=200)
+
+    objects = models.Manager()
+    published = BookManager()
+
+reveal_type(Book.objects)  # revealed: Manager[Book, QuerySet[Book, Book]]
+reveal_type(Book.objects.get())  # revealed: Book
+reveal_type(Book.objects.filter(title="Dune").first())  # revealed: Book | None
+```
+
+A subclass of `Manager` that does not name the model keeps its own class and methods. Its base class
+leaves the model unknown, so the methods it inherits from `Manager` still return `Unknown`:
+
+```py
+reveal_type(Book.published)  # revealed: BookManager & Manager[Book, QuerySet[Book, Book]]
+
+# TODO: Should be `Book`.
+reveal_type(Book.published.get())  # revealed: Unknown & Book
+```
+
+A model also inherits the managers of its base classes, bound to itself:
+
+```py
+class Publication(models.Model):
+    objects = models.Manager()
+
+    class Meta:
+        abstract = True
+
+class Magazine(Publication):
+    pass
+
+reveal_type(Magazine.objects.get())  # revealed: Magazine
+```
+
 ## Lookups
 
 The keyword arguments of `filter()` name fields of the model. Django raises `FieldError` for an

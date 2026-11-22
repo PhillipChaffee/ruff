@@ -1725,7 +1725,7 @@ impl<'db> StaticClassLiteral<'db> {
                 ) => Type::FunctionLiteral(
                     function.with_inherited_generic_context(db, generic_context),
                 ),
-                _ => django::refined_field_type(db, env, self, name, ty).unwrap_or(ty),
+                _ => django::refined_class_member(db, env, self, name, ty).unwrap_or(ty),
             }
         });
 

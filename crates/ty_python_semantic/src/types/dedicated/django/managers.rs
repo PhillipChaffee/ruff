@@ -2,8 +2,12 @@
 
 use crate::types::call::Binding;
 use crate::types::member::class_member;
-use crate::types::{ClassBase, KnownClass, Specialization, Type};
+use crate::types::{
+    ClassBase, IntersectionType, KnownClass, Specialization, StaticClassLiteral, Type,
+};
 use crate::{Db, ProgramEnvironment};
+
+use super::is_model;
 
 /// Synthesize the methods that a manager copies from its `QuerySet` class.
 ///
@@ -94,4 +98,102 @@ pub(in crate::types) fn from_queryset_return_type<'db>(
             generic_context.specialize(db, vec![model, queryset])
         }),
     ))
+}
+
+/// Bind a manager that the model `model` declares in its class body to the model.
+///
+/// Nothing in `models.Manager()` names the model, so the call creates a
+/// `Manager[Model, QuerySet[Model, Model]]`, and a subclass that does not name the model, such as
+/// `class BookManager(models.Manager)`, leaves the model unknown. Django binds every manager to the
+/// model that declares or inherits it, as if it were written `models.Manager["Book"]()`:
+/// ```py
+/// class Book(models.Model):
+///     objects = models.Manager()  # Manager[Book, QuerySet[Book, Book]]
+///     published = BookManager()  # BookManager, with the methods of Manager[Book, QuerySet[Book, Book]]
+/// ```
+///
+/// `ty` is the type of the manager according to the stubs. Returns `None` for anything that is not a
+/// manager, and for a manager whose class already names a model.
+pub(super) fn bound_manager<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+    model: StaticClassLiteral<'db>,
+    ty: Type<'db>,
+) -> Option<Type<'db>> {
+    let manager = ty.nominal_class(db, env)?;
+    let bases = || {
+        manager
+            .iter_mro(db)
+            .filter_map(ClassBase::into_class)
+            .filter_map(|base| base.static_class_literal(db))
+    };
+    let declared_model = bases()
+        .find(|(base, _)| base.is_known(db, KnownClass::DjangoBaseManager))
+        .and_then(|(_, specialization)| specialization?.types(db).first().copied())?;
+    let base_model = KnownClass::DjangoModel.to_instance(db, env);
+    if !(declared_model.is_dynamic() || declared_model == base_model) || !is_model(db, model) {
+        return None;
+    }
+
+    // The most derived generic manager class, which is `Manager` itself for `models.Manager()`.
+    let (generic_manager, _) = bases().find(|(base, _)| {
+        base.generic_context(db).is_some()
+            && base
+                .iter_mro(db, None)
+                .filter_map(ClassBase::into_class)
+                .any(|base| base.is_known(db, KnownClass::DjangoBaseManager))
+    })?;
+    let variables = generic_manager.generic_context(db)?.len(db);
+    let model_instance = Type::instance(db, env, model.default_specialization(db));
+    let bound = Type::instance(
+        db,
+        env,
+        generic_manager.apply_specialization(db, |generic_context| {
+            let mut types = vec![None; variables];
+            if let Some(first) = types.first_mut() {
+                *first = Some(model_instance);
+            }
+            generic_context.specialize_partial(db, types)
+        }),
+    );
+
+    if manager.static_class_literal(db).map(|(manager, _)| manager) == Some(generic_manager) {
+        Some(bound)
+    } else {
+        // A subclass keeps its own methods, and gets the model from the generic manager.
+        Some(IntersectionType::from_two_elements(db, env, ty, bound))
+    }
+}
+
+/// Return the manager `name` that the model `model` inherits from a base class, bound to `model`.
+///
+/// Django gives each model its own copy of the managers that its base classes declare, bound to the
+/// model:
+/// ```py
+/// class Publication(models.Model):
+///     objects = models.Manager()
+///
+///     class Meta:
+///         abstract = True
+///
+/// class Magazine(Publication): ...
+///
+/// # Magazine.objects is a Manager[Magazine, QuerySet[Magazine, Magazine]].
+/// ```
+pub(super) fn inherited_manager<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+    model: StaticClassLiteral<'db>,
+    name: &str,
+) -> Option<Type<'db>> {
+    // The first base class that declares `name` decides, whether or not it is a manager.
+    let declared = model
+        .iter_mro(db, None)
+        .skip(1)
+        .filter_map(ClassBase::into_class)
+        .filter_map(|base| base.static_class_literal(db))
+        .find_map(|(base, _)| {
+            class_member(db, base.body_scope(db), name).ignore_possibly_undefined()
+        })?;
+    bound_manager(db, env, model, declared)
 }
