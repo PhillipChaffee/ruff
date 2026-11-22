@@ -28,11 +28,9 @@ pub(super) fn annotate_return_type<'db, 'a>(
     declared: Type<'db>,
     keywords: impl IntoIterator<Item = &'a str>,
 ) -> Option<Type<'db>> {
-    let (queryset, specialization) = declared.nominal_class(db, env)?.static_class_literal(db)?;
-    if !queryset.is_known(db, KnownClass::DjangoQuerySet) {
-        return None;
-    }
-    let &[model, row] = specialization?.types(db) else {
+    let specialization = declared.known_specialization(db, env, KnownClass::DjangoQuerySet)?;
+    let queryset = KnownClass::DjangoQuerySet.try_to_class_literal(db, env)?;
+    let &[model, row] = specialization.types(db) else {
         return None;
     };
 
@@ -95,11 +93,9 @@ fn queryset_rows_return_type<'db>(
     fields: impl IntoIterator<Item = Type<'db>>,
     rows: QuerySetRows,
 ) -> Option<Type<'db>> {
-    let (queryset, specialization) = declared.nominal_class(db, env)?.static_class_literal(db)?;
-    if !queryset.is_known(db, KnownClass::DjangoQuerySet) {
-        return None;
-    }
-    let model = specialization?.types(db).first().copied()?;
+    let specialization = declared.known_specialization(db, env, KnownClass::DjangoQuerySet)?;
+    let queryset = KnownClass::DjangoQuerySet.try_to_class_literal(db, env)?;
+    let model = specialization.types(db).first().copied()?;
 
     let columns = fields
         .into_iter()
