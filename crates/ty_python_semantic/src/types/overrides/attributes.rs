@@ -463,13 +463,14 @@ fn attribute_violation<'db>(
     source: &AttributeContract<'db>,
     target: &AttributeContract<'db>,
 ) -> Option<AttributeViolation<'db>> {
-    // Django encourages a pattern where nested `Meta` classes are used for model configuration
-    // that would lead to invalid override errors. We suppress errors for that exact pattern.
+    // Django encourages a pattern where nested `Meta` classes are used for model and form
+    // configuration that would lead to invalid override errors. We suppress errors for that exact
+    // pattern.
     if name == "Meta"
         && receiver
             .nominal_class(db, env)
             .and_then(|class| class.static_class_literal(db))
-            .is_some_and(|(class, _)| django::is_model(db, class))
+            .is_some_and(|(class, _)| django::has_meta_options(db, class))
     {
         return None;
     }

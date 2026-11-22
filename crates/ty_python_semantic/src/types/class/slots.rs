@@ -186,6 +186,7 @@ impl InstanceDictionary {
             | KnownClass::DjangoLazySettings
             | KnownClass::DjangoBaseManager
             | KnownClass::DjangoQuerySet
+            | KnownClass::DjangoBaseForm
             | KnownClass::PydanticBaseModel
             | KnownClass::PydanticBaseSettings
             | KnownClass::PydanticConfigDict
