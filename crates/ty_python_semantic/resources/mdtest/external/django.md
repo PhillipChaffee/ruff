@@ -1824,4 +1824,147 @@ reveal_type(settings.RETRY_LIMIT)  # revealed: int
 reveal_type(settings.NOT_A_SETTING)  # revealed: Any
 ```
 
+## Settings defined at runtime
+
+A settings module can also define settings in ways that we cannot follow. We do not report unknown
+settings then.
+
+### Through `setattr`
+
+`setattr()` on the settings module defines a setting by name:
+
+`manage.py`:
+
+```py
+import os
+
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "mysite.settings")
+```
+
+`mysite/__init__.py`:
+
+```py
+```
+
+`mysite/settings.py`:
+
+```py
+import sys
+
+setattr(sys.modules[__name__], "RETRY_LIMIT", 3)
+```
+
+`app.py`:
+
+```py
+from django.conf import settings
+
+reveal_type(settings.RETRY_LIMIT)  # revealed: Any
+```
+
+### Through an alias of `globals`
+
+Calling `globals` under another name also defines settings:
+
+`manage.py`:
+
+```py
+import os
+
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "mysite.settings")
+```
+
+`mysite/__init__.py`:
+
+```py
+```
+
+`mysite/settings.py`:
+
+```py
+g = globals
+g()["RETRY_LIMIT"] = 3
+```
+
+`app.py`:
+
+```py
+from django.conf import settings
+
+reveal_type(settings.RETRY_LIMIT)  # revealed: Any
+```
+
+### Through `builtins.globals()`
+
+So does calling `globals` through the `builtins` module:
+
+`manage.py`:
+
+```py
+import os
+
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "mysite.settings")
+```
+
+`mysite/__init__.py`:
+
+```py
+```
+
+`mysite/settings.py`:
+
+```py
+import builtins
+
+builtins.globals()["RETRY_LIMIT"] = 3
+```
+
+`app.py`:
+
+```py
+from django.conf import settings
+
+reveal_type(settings.RETRY_LIMIT)  # revealed: Any
+```
+
+### A module whose name only starts with `split_settings`
+
+We stay silent for the `split_settings` package, which includes other files at runtime, but not for
+another module whose name happens to start the same way:
+
+`manage.py`:
+
+```py
+import os
+
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "mysite.settings")
+```
+
+`mysite/__init__.py`:
+
+```py
+```
+
+`split_settings_helpers.py`:
+
+```py
+```
+
+`mysite/settings.py`:
+
+```py
+import split_settings_helpers
+
+RETRY_LIMIT = 3
+```
+
+`app.py`:
+
+```py
+from django.conf import settings
+
+reveal_type(settings.RETRY_LIMIT)  # revealed: int
+settings.NOT_A_SETTING  # error: [invalid-attribute-access]
+```
+
 [django-stubs]: https://github.com/typeddjango/django-stubs

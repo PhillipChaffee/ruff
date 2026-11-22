@@ -188,10 +188,13 @@ impl<'ast> Visitor<'ast> for SettingsModuleFinder {
 /// Checks whether we can see every setting that a settings module defines, and collects the
 /// modules that it star-imports.
 ///
-/// A module can define names that we cannot see through a star import that we cannot resolve,
-/// such as `from .local import *` for a file that is not checked in; through `globals()`,
-/// `vars()`, `locals()` or `exec()`; through a module-level `__getattr__`; or through
-/// `django-split-settings`, which executes other files.
+/// A module can define names that we cannot see:
+/// - through a star import that we cannot resolve, such as `from .local import *` for a file that
+///   is not checked in;
+/// - through `globals()`, `vars()`, `locals()`, `exec()`, `setattr()` or `sys.modules`, including
+///   under another name, as in `g = globals`;
+/// - through a module-level `__getattr__`;
+/// - through `django-split-settings` (the `split_settings` package), which executes other files.
 struct CompletenessChecker<'db> {
     db: &'db dyn Db,
     importing_file: ImportingFile<'db>,
@@ -206,7 +209,7 @@ impl<'ast> Visitor<'ast> for CompletenessChecker<'_> {
                 if import
                     .module
                     .as_ref()
-                    .is_some_and(|module| module.as_str().starts_with("split_settings")) =>
+                    .is_some_and(|module| is_split_settings(module.as_str())) =>
             {
                 self.is_complete = false;
             }
@@ -224,7 +227,7 @@ impl<'ast> Visitor<'ast> for CompletenessChecker<'_> {
                 if import
                     .names
                     .iter()
-                    .any(|alias| alias.name.as_str().starts_with("split_settings")) =>
+                    .any(|alias| is_split_settings(alias.name.as_str())) =>
             {
                 self.is_complete = false;
             }
@@ -237,14 +240,29 @@ impl<'ast> Visitor<'ast> for CompletenessChecker<'_> {
     }
 
     fn visit_expr(&mut self, expr: &'ast ast::Expr) {
-        if let ast::Expr::Call(call) = expr
-            && let ast::Expr::Name(name) = &*call.func
-            && matches!(name.id.as_str(), "globals" | "vars" | "locals" | "exec")
-        {
+        // Any mention counts, called or not, so that an alias such as `g = globals` and an
+        // attribute such as `builtins.globals` or `sys.modules` are caught as well.
+        let name = match expr {
+            ast::Expr::Name(name) => Some(name.id.as_str()),
+            ast::Expr::Attribute(attribute) => Some(attribute.attr.as_str()),
+            _ => None,
+        };
+        if name.is_some_and(|name| {
+            matches!(
+                name,
+                "globals" | "vars" | "locals" | "exec" | "setattr" | "modules"
+            )
+        }) {
             self.is_complete = false;
         }
         walk_expr(self, expr);
     }
+}
+
+/// Returns whether `module` is the `split_settings` package of `django-split-settings`, or one of
+/// its submodules.
+fn is_split_settings(module: &str) -> bool {
+    module == "split_settings" || module.starts_with("split_settings.")
 }
 
 /// The models that Django knows about when it uses a model defined in `file`: the models in the
