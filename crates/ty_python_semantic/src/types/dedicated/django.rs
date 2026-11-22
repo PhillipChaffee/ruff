@@ -15,7 +15,7 @@ mod relations;
 pub(in crate::types) use fields::is_renamed_field;
 use fields::renamed_field;
 pub(in crate::types) use managers::from_queryset_return_type;
-use managers::manager_queryset_method;
+use managers::{bound_manager, inherited_manager, manager_queryset_method};
 pub(in crate::types) use model::is_automatic_primary_key_member;
 use model::{
     PrimaryKeyMember, date_navigation_method, display_method, foreign_key_id_member, init_method,
@@ -26,8 +26,9 @@ pub(in crate::types) use project::type_alias_override;
 pub(in crate::types) use queryset::{
     QuerySetRows, annotate_return_type, queryset_rows_return_type,
 };
+use relations::refined_field_type;
 use relations::reverse_accessor;
-pub(in crate::types) use relations::{foreign_key_model_type, is_foreign_key, refined_field_type};
+pub(in crate::types) use relations::{foreign_key_model_type, is_foreign_key};
 
 /// Returns whether `class` is a subclass of Django's `Model`.
 pub(in crate::types) fn is_model<'db>(db: &'db dyn Db, class: StaticClassLiteral<'db>) -> bool {
@@ -72,6 +73,7 @@ pub(in crate::types) fn synthesized_member<'db>(
         || name.starts_with("get_previous_by_"))
     {
         return renamed_field(db, class, specialization, name)
+            .or_else(|| inherited_manager(db, env, class, name))
             .or_else(|| reverse_accessor(db, class, name));
     }
     match name {
@@ -85,4 +87,17 @@ pub(in crate::types) fn synthesized_member<'db>(
             .or_else(|| parent_link_member(db, env, class, specialization, name))
             .or_else(|| reverse_accessor(db, class, name)),
     }
+}
+
+/// Return a more precise type for the member `name` of the class `class`, whose type according to the
+/// stubs is `ty`: a relation field whose related model the stubs could not determine, or a manager
+/// that is not yet bound to its model.
+pub(in crate::types) fn refined_class_member<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+    class: StaticClassLiteral<'db>,
+    name: &str,
+    ty: Type<'db>,
+) -> Option<Type<'db>> {
+    refined_field_type(db, env, class, name, ty).or_else(|| bound_manager(db, env, class, ty))
 }
