@@ -2018,79 +2018,15 @@ impl<'db> Bindings<'db> {
                     },
 
                     Type::BoundMethod(bound_method)
-                        if bound_method
-                            .function(db)
-                            .is_some_and(|function| function.name(db) == "from_queryset")
-                            && let Some(manager) = django::from_queryset_return_type(
-                                db,
-                                env,
-                                bound_method.self_instance(db),
-                                overload,
-                            ) =>
+                        if let Some(return_type) = django::queryset_method_return_type(
+                            db,
+                            env,
+                            bound_method,
+                            overload,
+                            call_arguments,
+                        ) =>
                     {
-                        overload.set_return_type(manager);
-                    }
-
-                    Type::BoundMethod(bound_method)
-                        if bound_method
-                            .function(db)
-                            .is_some_and(|function| function.name(db) == "annotate")
-                            && let Some(queryset) = django::annotate_return_type(
-                                db,
-                                env,
-                                overload.return_type(),
-                                call_arguments.iter().filter_map(|argument| {
-                                    match argument.kind() {
-                                        Argument::Keyword(name) => Some(name),
-                                        _ => None,
-                                    }
-                                }),
-                            ) =>
-                    {
-                        overload.set_return_type(queryset);
-                    }
-
-                    Type::BoundMethod(bound_method)
-                        if let Some(function) = bound_method.function(db)
-                            && matches!(function.name(db).as_str(), "values" | "values_list") =>
-                    {
-                        // The matched arguments include the bound `self` argument.
-                        let call_arguments =
-                            call_arguments.with_self(Some(bound_method.self_instance(db)));
-                        let parameters = overload.signature.parameters();
-                        let rows = if let Some((expressions, _)) = parameters.keyword_variadic() {
-                            overload
-                                .arguments_for_parameter(&call_arguments, expressions)
-                                .next()
-                                .is_none()
-                                .then_some(django::QuerySetRows::Dict)
-                        } else if let Ok(None) = overload.parameter_type_by_name(db, "named", false)
-                            && let Ok(flat) = overload.parameter_type_by_name(db, "flat", false)
-                        {
-                            to_bool(&flat, false).map(|flat| {
-                                if flat {
-                                    django::QuerySetRows::Flat
-                                } else {
-                                    django::QuerySetRows::Tuple
-                                }
-                            })
-                        } else {
-                            None
-                        };
-                        if let Some(rows) = rows
-                            && let Some((fields, _)) = parameters.variadic()
-                            && let Some(queryset) = django::queryset_rows_return_type(
-                                db,
-                                env,
-                                overload.return_type(),
-                                overload
-                                    .arguments_for_parameter(&call_arguments, fields)
-                                    .map(|(_, ty)| ty),
-                                rows,
-                            )
-                        {
-                            overload.set_return_type(queryset);
-                        }
+                        overload.set_return_type(return_type);
                     }
 
                     Type::BoundMethod(bound_method)
@@ -9710,7 +9646,7 @@ impl<'db> Binding<'db> {
         self.return_ty = return_ty;
     }
 
-    fn return_type(&self) -> Type<'db> {
+    pub(in crate::types) fn return_type(&self) -> Type<'db> {
         self.return_ty
     }
 

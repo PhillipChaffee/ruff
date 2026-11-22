@@ -2,7 +2,10 @@
 //!
 //! The members that Django creates at runtime are synthesized by [`synthesized_member`].
 
-use crate::types::{ClassBase, KnownClass, Specialization, StaticClassLiteral, Type};
+use crate::types::call::{Argument, Binding, CallArguments};
+use crate::types::{
+    BoundMethodType, ClassBase, KnownClass, Specialization, StaticClassLiteral, Type,
+};
 use crate::{Db, ProgramEnvironment};
 
 mod fields;
@@ -14,8 +17,9 @@ mod relations;
 
 pub(in crate::types) use fields::is_renamed_field;
 use fields::renamed_field;
-pub(in crate::types) use managers::from_queryset_return_type;
-use managers::{bound_manager, inherited_manager, manager_queryset_method};
+use managers::{
+    bound_manager, from_queryset_return_type, inherited_manager, manager_queryset_method,
+};
 pub(in crate::types) use model::is_automatic_primary_key_member;
 use model::{
     PrimaryKeyMember, date_navigation_method, display_method, foreign_key_id_member, init_method,
@@ -23,9 +27,7 @@ use model::{
 };
 use project::setting;
 pub(in crate::types) use project::type_alias_override;
-pub(in crate::types) use queryset::{
-    QuerySetRows, annotate_return_type, queryset_rows_return_type,
-};
+use queryset::{annotate_return_type, values_return_type};
 use relations::refined_field_type;
 use relations::reverse_accessor;
 pub(in crate::types) use relations::{foreign_key_model_type, is_foreign_key};
@@ -108,4 +110,51 @@ pub(in crate::types) fn refined_class_member<'db>(
     ty: Type<'db>,
 ) -> Option<Type<'db>> {
     refined_field_type(db, env, class, name, ty).or_else(|| bound_manager(db, env, class, ty))
+}
+
+/// Return the type of a call to a method of a Django manager or queryset, for the methods whose
+/// result the stubs cannot express: `Manager.from_queryset()`, `annotate()`, `values()` and
+/// `values_list()`. `binding` is the matched overload of the call.
+///
+/// `annotate()`, `values()` and `values_list()` are only refined when they are called on one of
+/// Django's managers or querysets, as the django-stubs mypy plugin does. A method with the same
+/// name on another class keeps its declared type, even when it returns a `QuerySet`.
+pub(in crate::types) fn queryset_method_return_type<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+    bound_method: BoundMethodType<'db>,
+    binding: &Binding<'db>,
+    arguments: &CallArguments<'_, 'db>,
+) -> Option<Type<'db>> {
+    let function = bound_method.function(db)?;
+    let receiver = bound_method.self_instance(db);
+    let is_django_receiver = || {
+        receiver.nominal_class(db, env).is_some_and(|class| {
+            class
+                .iter_mro(db)
+                .filter_map(ClassBase::into_class)
+                .any(|base| {
+                    base.is_known(db, KnownClass::DjangoQuerySet)
+                        || base.is_known(db, KnownClass::DjangoBaseManager)
+                })
+        })
+    };
+    match function.name(db).as_str() {
+        "from_queryset" => from_queryset_return_type(db, env, receiver, binding),
+        "annotate" if is_django_receiver() => annotate_return_type(
+            db,
+            env,
+            binding.return_type(),
+            arguments
+                .iter()
+                .filter_map(|argument| match argument.kind() {
+                    Argument::Keyword(name) => Some(name),
+                    _ => None,
+                }),
+        ),
+        "values" | "values_list" if is_django_receiver() => {
+            values_return_type(db, env, receiver, binding, arguments)
+        }
+        _ => None,
+    }
 }

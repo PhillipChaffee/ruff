@@ -1160,6 +1160,19 @@ reveal_type(Article.objects.values_list("title__length").get())  # revealed: Any
 reveal_type(Article.objects.values_list("title", named=True).get())  # revealed: Any
 ```
 
+Only Django's managers and querysets get these row types. A method with the same name on another
+class keeps its declared type, as in mypy:
+
+```py
+from typing import Any
+
+class Repository:
+    def values_list(self, *fields: str, flat: bool = False, named: bool = False) -> models.QuerySet[Article, Any]:
+        raise NotImplementedError
+
+reveal_type(Repository().values_list("title", flat=True))  # revealed: QuerySet[Article, Any]
+```
+
 ## Annotations
 
 `annotate()` adds an attribute to each instance in the `QuerySet` for every keyword argument:
@@ -1194,6 +1207,19 @@ for article in annotated.order_by("title"):
     reveal_type(article.title_length)  # revealed: Any
 
 reveal_type(annotated.values_list("title").get())  # revealed: tuple[str]
+```
+
+A method named `annotate` on a class that is not a Django manager or queryset keeps its declared
+type:
+
+```py
+from typing import Any
+
+class Archive:
+    def annotate(self, **kwargs: Any) -> models.QuerySet[Article, Article]:
+        raise NotImplementedError
+
+reveal_type(Archive().annotate(title_length=1))  # revealed: QuerySet[Article, Article]
 ```
 
 ## Field assignments
