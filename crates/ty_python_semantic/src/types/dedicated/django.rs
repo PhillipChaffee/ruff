@@ -14,6 +14,7 @@ use crate::types::{
 use crate::{Db, ProgramEnvironment};
 
 mod fields;
+mod lookups;
 mod managers;
 mod model;
 mod project;

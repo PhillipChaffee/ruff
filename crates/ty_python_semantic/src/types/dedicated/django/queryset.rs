@@ -17,6 +17,7 @@ use crate::types::typed_dict::{TypedDictFieldBuilder, TypedDictType};
 use crate::types::{ClassBase, ClassType, IntersectionType, KnownClass, Specialization, Type};
 use crate::{Db, ProgramEnvironment};
 
+use super::lookups::{LOOKUP_SEP, resolve_path};
 use super::{inherits_from, is_model};
 
 /// Return the type of the instance that a call to the constructor of a Django aggregate such as
@@ -384,9 +385,14 @@ enum QuerySetRows {
 /// Article.objects.values_list("title", named=True)  # rows are a named tuple with a `title: str`
 /// ```
 ///
+/// A name can follow relations to the fields of other models (see [`resolve_path`]):
+/// ```py
+/// Book.objects.values_list("author__name", flat=True)  # rows are `str`
+/// ```
+///
 /// Returns `None`, which keeps the declared type, for calls that this does not model: a call
-/// without fields, a field that is not a string literal, and a lookup that spans a relation such
-/// as `"author__name"`.
+/// without fields, a field that is not a string literal, and a name that ends with a transform,
+/// such as `"title__length"`.
 fn queryset_rows_return_type<'db>(
     db: &'db dyn Db,
     env: &ProgramEnvironment<'db>,
@@ -402,10 +408,16 @@ fn queryset_rows_return_type<'db>(
         .into_iter()
         .map(|field| {
             let name = field.as_string_literal()?.value(db);
-            let ty = model
-                .member(db, env, name)
-                .place
-                .ignore_possibly_undefined()?;
+            let ty = if name.contains(LOOKUP_SEP) {
+                let (model, _) = model.nominal_class(db, env)?.static_class_literal(db)?;
+                resolve_path(db, model, name).value_type(db, env)?
+            } else {
+                // The member of the model, which can also be an annotation.
+                model
+                    .member(db, env, name)
+                    .place
+                    .ignore_possibly_undefined()?
+            };
             Some((Name::new(name), ty))
         })
         .collect::<Option<Vec<_>>>()?;

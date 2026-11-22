@@ -102,6 +102,7 @@ impl<'db> Field<'db> {
         field.metadata.null = is_true("null");
         field.metadata.to_field = string("to_field");
         field.metadata.related_name = string("related_name");
+        field.metadata.related_query_name = string("related_query_name");
         field.metadata.parent_link = is_true("parent_link");
         field
     }
@@ -117,6 +118,7 @@ pub(super) struct FieldMetadata {
     pub(super) to_field: Option<Name>,
     pub(super) parent_link: bool,
     pub(super) related_name: Option<Name>,
+    pub(super) related_query_name: Option<Name>,
 }
 
 /// All fields defined on this Django model (not including base class fields).
