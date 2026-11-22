@@ -13,13 +13,14 @@ use ty_module_resolver::{
 };
 use ty_python_core::{Program, ProgramFile, global_scope, use_def_map};
 
-use crate::place::{global_symbol, known_module_symbol};
+use crate::place::{DefinedPlace, Definedness, Place, global_symbol, known_module_symbol};
 use crate::types::{
     KnownClass, Parameter, Parameters, Signature, StaticClassLiteral, Type, UnionType, binding_type,
 };
 use crate::{Db, FxIndexSet, ProgramEnvironment};
 
 use super::is_model;
+use super::relations::registered_model;
 
 /// Return the type of the setting `name` on `django.conf.settings`, an instance of `LazySettings`.
 ///
@@ -45,7 +46,7 @@ pub(super) fn setting<'db>(
     {
         return None;
     }
-    let project_settings = project_settings(db, class.body_scope(db).program_file(db));
+    let project_settings = project_settings(db, class.body_scope(db).program_file(db).program(db));
 
     if name == "__getattr__" {
         // Every setting that exists is a synthesized member, so `__getattr__` is only reached for
@@ -92,14 +93,15 @@ struct ProjectSettings<'db> {
     is_complete: bool,
 }
 
-/// Find the settings module of the project, for the program of `conf`, the file of
-/// `django.conf`.
+/// Find the settings module of the project of `program`.
 ///
 /// NOTE FOR REVIEWERS: this reads the project's own settings module, which no other part of ty's
-/// Django support does. It runs no code. Django reads the module named by the
-/// `DJANGO_SETTINGS_MODULE` environment variable. We do not read the environment of the process
-/// that runs ty, because it is usually not the environment that runs Django. Instead, we use the
-/// default that a project's `manage.py` sets, as `django-admin startproject` generates it:
+/// Django support does. It runs no code. The settings give the types of `django.conf.settings`
+/// (see [`setting`]) and the user model (see [`user_model_setting`]). Django reads the module
+/// named by the `DJANGO_SETTINGS_MODULE` environment variable. We do not read the environment of
+/// the process that runs ty, because it is usually not the environment that runs Django. Instead,
+/// we use the default that a project's `manage.py` sets, as `django-admin startproject` generates
+/// it:
 /// ```py
 /// os.environ.setdefault("DJANGO_SETTINGS_MODULE", "mysite.settings")
 /// ```
@@ -108,8 +110,8 @@ struct ProjectSettings<'db> {
 /// elsewhere, or that runs with a different settings module than its `manage.py` names, can get
 /// the wrong settings, which can report settings that the real settings module defines.
 #[salsa::tracked(returns(copy), heap_size=ruff_memory_usage::heap_size)]
-fn project_settings<'db>(db: &'db dyn Db, conf: ProgramFile<'db>) -> Option<ProjectSettings<'db>> {
-    let env = ProgramEnvironment::from_file(conf);
+fn project_settings<'db>(db: &'db dyn Db, program: Program<'db>) -> Option<ProjectSettings<'db>> {
+    let env = ProgramEnvironment::from_program(program);
     let resolver_environment = env.resolver_environment(db);
     let first_party_file = |name: &ModuleName| {
         let module = resolve_module_confident(db, resolver_environment, name)?;
@@ -124,7 +126,7 @@ fn project_settings<'db>(db: &'db dyn Db, conf: ProgramFile<'db>) -> Option<Proj
 
     let manage = first_party_file(&ModuleName::new_static("manage")?)?;
     let mut finder = SettingsModuleFinder::default();
-    let program_file = |file| ProgramFile::new(db, file, env.program(db));
+    let program_file = |file| ProgramFile::new(db, file, program);
     finder.visit_body(
         parsed_module(db, program_file(manage).python_file(db))
             .load(db)
@@ -350,6 +352,33 @@ pub(super) fn models_modules<'db>(
     files.into_boxed_slice()
 }
 
+/// Return the value of the `AUTH_USER_MODEL` setting of the project of `program`, which names the
+/// user model as `"<app label>.<model>"`, if we can determine it without running any code.
+///
+/// The value must be a string literal that the settings module always assigns:
+/// ```py
+/// AUTH_USER_MODEL = "accounts.Member"
+/// ```
+///
+/// Without such an assignment, the value is Django's default, `"auth.User"`. We only use the
+/// settings module if we can see every setting that it defines (see [`project_settings`]), because
+/// it could otherwise set `AUTH_USER_MODEL` in a way that we do not see.
+fn user_model_setting<'db>(db: &'db dyn Db, program: Program<'db>) -> Option<&'db str> {
+    let project_settings = project_settings(db, program)?;
+    if !project_settings.is_complete {
+        return None;
+    }
+    match global_symbol(db, project_settings.file, "AUTH_USER_MODEL").place {
+        Place::Undefined => Some("auth.User"),
+        Place::Defined(DefinedPlace {
+            ty,
+            definedness: Definedness::AlwaysDefined,
+            ..
+        }) => Some(ty.as_string_literal()?.value(db)),
+        Place::Defined(_) => None,
+    }
+}
+
 /// Return the type that one of django-stubs' type aliases denotes, if we replace it.
 ///
 /// `ty` is the type that the alias denotes according to the stubs.
@@ -357,8 +386,9 @@ pub(super) fn models_modules<'db>(
 /// `_User` in `django.contrib.auth.models` is the stubs' placeholder for the model named by the
 /// `AUTH_USER_MODEL` setting. It is declared as `AbstractBaseUser` and used wherever Django
 /// returns the user model, such as `get_user_model()` and `HttpRequest.user`. The stubs expect a
-/// type checker to refine it. We do not read settings, so we use `AbstractUser`: it is the base
-/// class of Django's default `User` model and of most custom user models, and it has the
+/// type checker to refine it. We use the model that the project's settings name (see
+/// [`user_model_setting`]). When we cannot determine that model, we use `AbstractUser`: it is the
+/// base class of Django's default `User` model and of most custom user models, and it has the
 /// attributes that `AbstractBaseUser` lacks, such as `username` and `is_superuser`.
 ///
 /// `_ChoicesPrimitive` in `django.utils.choices` is the type of the `choices` argument of a
@@ -391,7 +421,12 @@ pub(in crate::types) fn type_alias_override<'db>(
             .to_instance_approximation(db, &env)
     };
     match module {
-        KnownModule::DjangoContribAuthModels => instance_of(module, "AbstractUser"),
+        KnownModule::DjangoContribAuthModels => match user_model_setting(db, file.program(db)) {
+            Some("auth.User") => instance_of(module, "User"),
+            Some(reference) => registered_model(db, &env, reference),
+            None => None,
+        }
+        .or_else(|| instance_of(module, "AbstractUser")),
         _ => Some(UnionType::from_two_elements(
             db,
             &env,
