@@ -1,9 +1,11 @@
 //! Field paths such as `author__name`, which name a field of a model or, through relations, of
 //! another model.
 
-use ruff_python_ast::name::Name;
+use ruff_python_ast::{self as ast, name::Name};
 use ty_module_resolver::{SearchPath, file_to_module};
 
+use crate::types::context::InferContext;
+use crate::types::diagnostic::INVALID_ARGUMENT_TYPE;
 use crate::types::{ClassBase, KnownClass, StaticClassLiteral, Type, UnionType};
 use crate::{Db, ProgramEnvironment};
 
@@ -260,7 +262,120 @@ impl<'db> ResolvedPath<'_, 'db> {
     }
 }
 
-/// Resolve the path `path`, such as `author__name`, on the model `model`, as Django does for the
+/// The model of a query, and the names that `annotate()` and `alias()` added to the query.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct QueryContext<'db> {
+    model: StaticClassLiteral<'db>,
+    /// The names that a path can start with, besides the names of the model.
+    annotations: Box<[Name]>,
+}
+
+impl<'db> QueryContext<'db> {
+    /// A query of `model` without annotations.
+    pub(super) fn of_model(model: StaticClassLiteral<'db>) -> Self {
+        Self {
+            model,
+            annotations: Box::default(),
+        }
+    }
+}
+
+/// Return the query of the Django manager or queryset `receiver`, if we see every name that the
+/// query can use: `receiver` is one of Django's own managers or querysets, its rows are instances
+/// of the model, and the model is annotated only with names that we see.
+///
+/// `annotate()` and `alias()` intersect the model with a protocol that has one member per name:
+/// ```py
+/// books = Book.objects.annotate(review_count=Count("reviews"))  # QuerySet[Book & <Protocol>, ...]
+/// books.order_by("review_count")
+/// ```
+///
+/// The stubs declare that `extra()`, whose names we do not see, returns `QuerySet[Any, Any]`.
+///
+/// A custom manager or `QuerySet` class can add names that are not part of its type, so we do not
+/// check its queries:
+/// ```py
+/// class BookManager(models.Manager["Book"]):
+///     def get_queryset(self):
+///         return super().get_queryset().annotate(review_count=Count("reviews"))
+/// ```
+pub(super) fn query_context<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+    receiver: Type<'db>,
+) -> Option<QueryContext<'db>> {
+    // `self` in a method of a custom `QuerySet` class, which its callers can annotate.
+    if matches!(receiver, Type::TypeVar(_)) {
+        return None;
+    }
+    let is_django_class = |class: StaticClassLiteral<'db>| {
+        file_to_module(db, class.program_file(db).resolver_file(db))
+            .is_some_and(|module| module.name(db).first_component() == "django")
+    };
+    // The classes up to `QuerySet` or `BaseManager` must all be Django's own.
+    let django_base = |ty: Type<'db>| {
+        for base in ty
+            .nominal_class(db, env)?
+            .iter_mro(db)
+            .filter_map(ClassBase::into_class)
+        {
+            let (base, specialization) = base.static_class_literal(db)?;
+            if !is_django_class(base) {
+                return None;
+            }
+            if base.is_known(db, KnownClass::DjangoQuerySet)
+                || base.is_known(db, KnownClass::DjangoBaseManager)
+            {
+                return Some((base, specialization?));
+            }
+        }
+        None
+    };
+    let (base, specialization) = django_base(receiver)?;
+    let &[model, second] = specialization.types(db) else {
+        return None;
+    };
+    let rows_are_models = if base.is_known(db, KnownClass::DjangoBaseManager) {
+        // The second type argument of a manager is its `QuerySet` class.
+        django_base(second).is_some()
+    } else {
+        // `values()` and `values_list()` change the rows, and can name expressions.
+        second == model
+    };
+    if !rows_are_models {
+        return None;
+    }
+
+    let mut annotations = Vec::new();
+    let model = match model {
+        Type::NominalInstance(instance) => instance,
+        Type::Intersection(intersection) => {
+            let mut model = None;
+            for element in intersection.positive(db) {
+                match element {
+                    Type::NominalInstance(instance) if model.is_none() => model = Some(*instance),
+                    Type::ProtocolInstance(protocol) => annotations.extend(
+                        protocol
+                            .interface(db)
+                            .members(db)
+                            .map(|member| Name::new(member.name())),
+                    ),
+                    // An element that can add names that we do not see.
+                    _ => return None,
+                }
+            }
+            model?
+        }
+        _ => return None,
+    };
+    let (model, _) = model.class(db, env).static_class_literal(db)?;
+    is_model(db, model).then(|| QueryContext {
+        model,
+        annotations: annotations.into_boxed_slice(),
+    })
+}
+
+/// Resolve the path `path`, such as `author__name`, in the query `query`, as Django does for the
 /// field names of `values()`, `order_by()` and other `QuerySet` methods.
 ///
 /// Each name is looked up on the model that the previous name leads to: a forward relation leads
@@ -280,15 +395,15 @@ impl<'db> ResolvedPath<'_, 'db> {
 /// A relation from another model is named by the `related_query_name` of its field, or else by
 /// its `related_name`, or else by the lowercase name of the other model. The names after a field
 /// that holds a value are not checked, because they can be transforms or lookups, such as
-/// `title__length`.
+/// `title__length`. Nor are the names after an annotation, whose type we do not know.
 pub(super) fn resolve_path<'a, 'db>(
     db: &'db dyn Db,
-    model: StaticClassLiteral<'db>,
+    query: &QueryContext<'db>,
     path: &'a str,
 ) -> ResolvedPath<'a, 'db> {
     let mut steps = Vec::new();
-    let mut current = Some(model);
-    for name in path.split(LOOKUP_SEP) {
+    let mut current = Some(query.model);
+    for (index, name) in path.split(LOOKUP_SEP).enumerate() {
         let Some(model) = current else {
             steps.push(PathStep {
                 name,
@@ -298,7 +413,12 @@ pub(super) fn resolve_path<'a, 'db>(
         };
         let names = model_names(db, model);
         let Some(kind) = names.get(name) else {
-            if names.is_complete {
+            let is_annotation = index == 0
+                && query
+                    .annotations
+                    .iter()
+                    .any(|annotation| annotation == name);
+            if names.is_complete && !is_annotation {
                 return ResolvedPath {
                     steps: steps.into_boxed_slice(),
                     error: Some(PathError::UnknownName { model, name }),
@@ -324,5 +444,149 @@ pub(super) fn resolve_path<'a, 'db>(
     ResolvedPath {
         steps: steps.into_boxed_slice(),
         error: None,
+    }
+}
+
+/// A `QuerySet` method that takes field names as strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FieldNamesMethod {
+    /// `order_by("-title", "author__name")`
+    OrderBy,
+    /// `only("title")` or `defer("title")`
+    OnlyOrDefer,
+    /// `select_related("author")`, which only takes relations to a single row.
+    SelectRelated,
+}
+
+impl FieldNamesMethod {
+    pub(super) fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "order_by" => Some(Self::OrderBy),
+            "only" | "defer" => Some(Self::OnlyOrDefer),
+            "select_related" => Some(Self::SelectRelated),
+            _ => None,
+        }
+    }
+
+    /// Return the error that Django raises for the field name `path` in the query `query`, if any.
+    fn error<'db>(self, db: &'db dyn Db, query: &QueryContext<'db>, path: &str) -> Option<String> {
+        let path = match self {
+            // `?` orders randomly, and a name with a `.` names a database column.
+            Self::OrderBy if path == "?" || path.contains('.') => return None,
+            Self::OrderBy => path.strip_prefix('-').unwrap_or(path),
+            Self::OnlyOrDefer | Self::SelectRelated => path,
+        };
+        let resolved = resolve_path(db, query, path);
+        if let Some(PathError::UnknownName { model, name }) = resolved.error {
+            return Some(match self {
+                Self::OrderBy => format!("Cannot resolve keyword '{name}' into field"),
+                Self::OnlyOrDefer => format!("{} has no field named '{name}'", model.name(db)),
+                Self::SelectRelated => {
+                    format!("Invalid field name(s) given in select_related: '{name}'")
+                }
+            });
+        }
+        if self != Self::SelectRelated {
+            return None;
+        }
+        // `select_related()` follows the relations that lead to a single row: forward relations
+        // that are not many-to-many, and one-to-one relations from another model.
+        for step in &resolved.steps {
+            let name = step.name;
+            match step.resolved?.1 {
+                ModelNameKind::ForwardRelation { is_many: false, .. }
+                | ModelNameKind::ReverseRelation {
+                    is_one_to_one: true,
+                    ..
+                } => {}
+                ModelNameKind::Field { .. } => {
+                    return Some(format!(
+                        "Non-relational field given in select_related: '{name}'"
+                    ));
+                }
+                ModelNameKind::ForwardRelation { .. } | ModelNameKind::ReverseRelation { .. } => {
+                    return Some(format!(
+                        "Invalid field name(s) given in select_related: '{name}'"
+                    ));
+                }
+            }
+        }
+        None
+    }
+}
+
+/// Report the field names in the arguments of a call of `method` on a manager or queryset that
+/// Django cannot resolve in the query `query`:
+/// ```py
+/// Book.objects.order_by("title")  # Cannot resolve keyword 'title' into field
+/// ```
+///
+/// Only string literals are checked, and only on models whose names we all see.
+pub(super) fn report_field_names<'db>(
+    context: &InferContext<'db, '_>,
+    method: FieldNamesMethod,
+    query: &QueryContext<'db>,
+    arguments: &ast::Arguments,
+) {
+    for argument in &arguments.args {
+        if let Some(literal) = argument.as_string_literal_expr()
+            && let Some(message) = method.error(context.db(), query, literal.value.to_str())
+            && let Some(builder) = context.report_lint(&INVALID_ARGUMENT_TYPE, argument)
+        {
+            builder.into_diagnostic(message);
+        }
+    }
+}
+
+/// Report the names in the `update_fields` argument of `Model.save()` or `Model.asave()` that are
+/// not fields that Django can update on `model`: the fields that hold a value and the forward
+/// relations to a single row.
+/// ```py
+/// book.save(update_fields=["title"])
+/// ```
+pub(super) fn report_update_fields<'db>(
+    context: &InferContext<'db, '_>,
+    model: StaticClassLiteral<'db>,
+    arguments: &ast::Arguments,
+) {
+    let db = context.db();
+    let Some(update_fields) = arguments.find_keyword("update_fields") else {
+        return;
+    };
+    let elements = match &update_fields.value {
+        ast::Expr::List(list) => &list.elts,
+        ast::Expr::Tuple(tuple) => &tuple.elts,
+        ast::Expr::Set(set) => &set.elts,
+        _ => return,
+    };
+    for element in elements {
+        let Some(literal) = element.as_string_literal_expr() else {
+            continue;
+        };
+        let name = literal.value.to_str();
+        let resolved = resolve_path(db, &QueryContext::of_model(model), name);
+        let is_updatable = resolved.error.is_none()
+            && match &*resolved.steps {
+                [step] => match step.resolved {
+                    // A model whose names we do not all see.
+                    None => true,
+                    Some((
+                        _,
+                        ModelNameKind::Field { .. }
+                        | ModelNameKind::ForwardRelation { is_many: false, .. },
+                    )) => true,
+                    Some(_) => false,
+                },
+                // We do not check the other names of a model whose names we do not all see.
+                [first, ..] => first.resolved.is_none(),
+                [] => true,
+            };
+        if !is_updatable && let Some(builder) = context.report_lint(&INVALID_ARGUMENT_TYPE, element)
+        {
+            builder.into_diagnostic(format_args!(
+                "'{name}' is not a field of `{}` that can be updated",
+                model.name(db)
+            ));
+        }
     }
 }
