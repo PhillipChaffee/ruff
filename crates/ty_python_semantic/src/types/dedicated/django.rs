@@ -19,7 +19,7 @@ pub(in crate::types) use fields::is_renamed_field;
 use fields::renamed_field;
 use managers::{
     bound_manager, create_method, from_queryset_return_type, inherited_manager,
-    manager_queryset_method,
+    manager_queryset_method, related_manager_member,
 };
 pub(in crate::types) use model::is_automatic_primary_key_member;
 use model::{
@@ -86,6 +86,9 @@ pub(in crate::types) fn synthesized_member<'db>(
 ) -> Option<Type<'db>> {
     if class.is_known(db, KnownClass::DjangoBaseManager) {
         return manager_queryset_method(db, env, specialization?, name);
+    }
+    if let Some(member) = related_manager_member(db, env, class, specialization, name) {
+        return Some(member);
     }
     if let Some(setting) = setting(db, env, class, name) {
         return Some(setting);

@@ -1,7 +1,8 @@
 //! Managers: the methods they copy from their `QuerySet` class, `Manager.from_queryset()`, and
 //! the keywords of `create()`.
 
-use ty_module_resolver::file_to_module;
+use ty_module_resolver::{KnownModule, file_to_module};
+use ty_python_core::place_table;
 
 use crate::types::call::Binding;
 use crate::types::callable::CallableTypeKind;
@@ -13,6 +14,7 @@ use crate::types::{
 };
 use crate::{Db, ProgramEnvironment};
 
+use super::fields::default_manager_name;
 use super::is_model;
 
 /// Synthesize the methods that a manager copies from its `QuerySet` class.
@@ -202,6 +204,105 @@ pub(super) fn inherited_manager<'db>(
             class_member(db, base.body_scope(db), name).ignore_possibly_undefined()
         })?;
     bound_manager(db, env, model, declared)
+}
+
+/// Return the default manager of the model `model`, bound to `model`.
+///
+/// The default manager is the manager that `Meta.default_manager_name` names, or else the first
+/// manager that the model declares or inherits. Django orders the managers by the position in the
+/// MRO of the class that declares them, and then by the order of their declarations:
+/// ```py
+/// class Book(models.Model):
+///     objects = models.Manager()
+///     published = PublishedManager()
+///
+/// # The default manager of Book is `objects`.
+/// ```
+///
+/// Returns `None` for a model without a manager of its own, whose default manager is the
+/// `objects` manager that Django adds.
+#[salsa::tracked(returns(copy), cycle_initial=|_, _, _| None, heap_size=ruff_memory_usage::heap_size)]
+pub(super) fn default_manager<'db>(
+    db: &'db dyn Db,
+    model: StaticClassLiteral<'db>,
+) -> Option<Type<'db>> {
+    let env = ProgramEnvironment::from_scope(model.body_scope(db));
+    let name = default_manager_name(db, &env, model);
+    let is_manager = |ty: Type<'db>| {
+        ty.nominal_class(db, &env).is_some_and(|class| {
+            class
+                .iter_mro(db)
+                .filter_map(ClassBase::into_class)
+                .any(|base| base.is_known(db, KnownClass::DjangoBaseManager))
+        })
+    };
+    model
+        .iter_mro(db, None)
+        .filter_map(ClassBase::into_class)
+        .filter_map(|base| base.static_class_literal(db))
+        .map(|(base, _)| base)
+        .filter(|base| is_model(db, *base))
+        .find_map(|base| {
+            let scope = base.body_scope(db);
+            place_table(db, scope)
+                .symbols()
+                .map(|symbol| symbol.name().as_str())
+                .filter(|symbol| name.is_none_or(|name| *symbol == name))
+                .find_map(|symbol| {
+                    let ty = class_member(db, scope, symbol).ignore_possibly_undefined()?;
+                    is_manager(ty).then(|| bound_manager(db, &env, model, ty).unwrap_or(ty))
+                })
+        })
+}
+
+/// Return the member `name` that the related manager `class`, specialized with `specialization`,
+/// gets from the default manager of its model.
+///
+/// Django creates the manager of a reverse foreign key or of a many-to-many field as a subclass of
+/// the class of the related model's default manager, so it has the methods that a custom manager
+/// or `QuerySet` class adds:
+/// ```py
+/// class StoryQuerySet(models.QuerySet["Story"]):
+///     def published(self) -> "StoryQuerySet": ...
+///
+/// class Story(models.Model):
+///     author = models.ForeignKey(Author, on_delete=models.CASCADE)
+///     objects = StoryQuerySet.as_manager()
+///
+/// # author.story_set.published() returns a StoryQuerySet.
+/// ```
+///
+/// django-stubs models these managers as `RelatedManager` and `ManyRelatedManager`, whose first
+/// type argument is the model. We only add the members that these classes and their base classes
+/// do not declare, so that methods such as `first()` keep the types that the stubs give them.
+pub(super) fn related_manager_member<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+    class: StaticClassLiteral<'db>,
+    specialization: Option<Specialization<'db>>,
+    name: &str,
+) -> Option<Type<'db>> {
+    if !matches!(
+        class.name(db).as_str(),
+        "RelatedManager" | "ManyRelatedManager"
+    ) || name.starts_with('_')
+        || !file_to_module(db, class.program_file(db).resolver_file(db)).is_some_and(|module| {
+            module.is_known(db, KnownModule::DjangoDbModelsFieldsRelatedDescriptors)
+        })
+        || class
+            .iter_mro(db, specialization)
+            .filter_map(ClassBase::into_class)
+            .filter_map(|base| base.static_class_literal(db))
+            .any(|(base, _)| !class_member(db, base.body_scope(db), name).is_undefined())
+    {
+        return None;
+    }
+    let model = *specialization?.types(db).first()?;
+    let (model, _) = model.nominal_class(db, env)?.static_class_literal(db)?;
+    default_manager(db, model)?
+        .member(db, env, name)
+        .place
+        .ignore_possibly_undefined()
 }
 
 /// Give `create()` and `acreate()` of a manager or queryset the keyword parameters of the model's
