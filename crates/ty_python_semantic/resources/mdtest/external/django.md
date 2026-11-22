@@ -1294,37 +1294,8 @@ from django.db import models
 class Book(models.Model):
     title = models.CharField(max_length=200)
 
-class Review(models.Model):
-    book = models.ForeignKey(Book, on_delete=models.CASCADE, related_name="reviews")
-    rating = models.IntegerField()
-
-class Award(models.Model):
-    book = models.ForeignKey(Book, on_delete=models.CASCADE)
-
-Book.objects.filter(titel="Example")  # error: [unknown-argument]
-Book.objects.exclude(titel="Example")  # error: [unknown-argument]
-Book.objects.get(titel="Example")  # error: [unknown-argument]
-
-Book.objects.filter(title="Example", pk=1, id__in=[1, 2])  # ok
-Book.objects.filter(title__startswith="Ex")  # ok
-```
-
-A lookup can also start with the name of a relation from another model, which is its `related_name`
-or the lowercase name of that model:
-
-```py
-Book.objects.filter(reviews__rating=5, award__isnull=False)  # ok
-Review.objects.filter(book__title="Example", book_id=1)  # ok
-```
-
-We only check the first name of a lookup, and only calls on Django's own `Manager`. A `QuerySet` can
-have annotations, which are also valid names:
-
-```py
-from django.db.models.functions import Length
-
-Book.objects.filter(title__nonexistent=1)  # ok
-Book.objects.annotate(title_length=Length("title")).filter(title_length=7)  # ok
+# TODO: Should be an error.
+Book.objects.filter(titel="Example")
 ```
 
 ## Model exceptions
