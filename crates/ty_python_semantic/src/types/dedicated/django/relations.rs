@@ -78,8 +78,6 @@ fn reverse_accessors<'db>(
     let target = Type::instance(db, &env, class.default_specialization(db));
 
     let sources = project_models(db, file)
-        .iter()
-        .copied()
         // Abstract models have no table, so nothing can refer to their rows.
         .filter(|source| !model_metadata(db, *source).is_abstract);
 

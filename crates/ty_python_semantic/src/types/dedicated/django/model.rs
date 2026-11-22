@@ -341,8 +341,6 @@ pub(super) fn primary_key_member<'db>(
         };
         let (abstract_subclasses, concrete_subclasses): (Vec<_>, Vec<_>) =
             project_models(db, class.body_scope(db).program_file(db))
-                .iter()
-                .copied()
                 .filter(|model| inherits_from(*model, class))
                 .partition(|model| model_metadata(db, *model).is_abstract);
         // The attribute lookup on an abstract subclass also reaches this class. Such a subclass

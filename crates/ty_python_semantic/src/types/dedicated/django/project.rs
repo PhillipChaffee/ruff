@@ -11,7 +11,7 @@ use ty_module_resolver::{
     ImportingFile, KnownModule, Module, ModuleName, ResolverEnvironment, SearchPath,
     file_to_module, list_modules, resolve_module_confident, resolve_module_for_import_from,
 };
-use ty_python_core::{ProgramFile, global_scope, use_def_map};
+use ty_python_core::{Program, ProgramFile, global_scope, use_def_map};
 
 use crate::place::{global_symbol, known_module_symbol};
 use crate::types::{
@@ -267,26 +267,47 @@ fn is_split_settings(module: &str) -> bool {
 
 /// The models that Django knows about when it uses a model defined in `file`: the models in the
 /// global scope of `file` itself and of the project's `models` modules (see [`models_modules`]).
-#[salsa::tracked(returns(deref), cycle_initial=|_, _, _| Box::default(), heap_size=ruff_memory_usage::heap_size)]
+///
+/// The models of `file` come first, followed by the models of the `models` modules in the order of
+/// those modules, each model once.
 pub(super) fn project_models<'db>(
     db: &'db dyn Db,
     file: ProgramFile<'db>,
+) -> impl Iterator<Item = StaticClassLiteral<'db>> + 'db {
+    let own_models = file_models(db, file);
+    own_models.iter().copied().chain(
+        models_module_models(db, file.program(db))
+            .iter()
+            .copied()
+            .filter(move |model| !own_models.contains(model)),
+    )
+}
+
+/// The models of the project's `models` modules, each model once. A module that several `models`
+/// modules import from contributes its models only once.
+#[salsa::tracked(returns(deref), cycle_initial=|_, _, _| Box::default(), heap_size=ruff_memory_usage::heap_size)]
+fn models_module_models<'db>(
+    db: &'db dyn Db,
+    program: Program<'db>,
 ) -> Box<[StaticClassLiteral<'db>]> {
-    let env = ProgramEnvironment::from_file(file);
-    // A module that several `models` modules import from contributes each model only once.
-    let models: FxIndexSet<_> = std::iter::once(file)
-        .chain(
-            models_modules(db, env.resolver_environment(db))
+    let env = ProgramEnvironment::from_program(program);
+    let models: FxIndexSet<_> = models_modules(db, env.resolver_environment(db))
+        .iter()
+        .flat_map(|module| {
+            file_models(db, ProgramFile::new(db, *module, program))
                 .iter()
-                .map(|module| ProgramFile::new(db, *module, env.program(db))),
-        )
-        .flat_map(|file| {
-            use_def_map(db, global_scope(db, file))
-                .all_end_of_scope_symbol_bindings()
-                .flat_map(|(_, bindings)| {
-                    bindings.filter_map(|binding| binding.binding.definition())
-                })
+                .copied()
         })
+        .collect();
+    models.into_iter().collect()
+}
+
+/// The models in the global scope of `file`, including models that it imports.
+#[salsa::tracked(returns(deref), cycle_initial=|_, _, _| Box::default(), heap_size=ruff_memory_usage::heap_size)]
+fn file_models<'db>(db: &'db dyn Db, file: ProgramFile<'db>) -> Box<[StaticClassLiteral<'db>]> {
+    let models: FxIndexSet<_> = use_def_map(db, global_scope(db, file))
+        .all_end_of_scope_symbol_bindings()
+        .flat_map(|(_, bindings)| bindings.filter_map(|binding| binding.binding.definition()))
         .filter_map(|definition| binding_type(db, definition).as_class_literal()?.as_static())
         .filter(|class| is_model(db, *class))
         .collect();
