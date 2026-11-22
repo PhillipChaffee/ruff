@@ -13,7 +13,7 @@ use crate::{Db, ProgramEnvironment};
 
 use super::fields::{Field, model_metadata, own_model_fields};
 use super::model::concrete_model;
-use super::project::project_models;
+use super::project::{models_modules, project_models};
 use super::{inherits_from, is_model};
 
 /// Returns whether `class` is Django's `ForeignKey` or one of its subclasses.
@@ -289,11 +289,19 @@ fn model_reference<'db>(
             }
         }
         None => to,
-    }
-    .to_instance_approximation(db, env)?;
+    };
+    model_instance(db, env, related)
+}
 
-    let (related_class, _) = related.nominal_class(db, env)?.static_class_literal(db)?;
-    is_model(db, related_class).then_some(related)
+/// Return the instance type of `class`, if it is a model class.
+fn model_instance<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+    class: Type<'db>,
+) -> Option<Type<'db>> {
+    let instance = class.to_instance_approximation(db, env)?;
+    let (model, _) = instance.nominal_class(db, env)?.static_class_literal(db)?;
+    is_model(db, model).then_some(instance)
 }
 
 /// Look up `name` in the `models` module of the app with the label `app_label`, for a reference
@@ -331,6 +339,44 @@ fn app_model_symbol<'db>(
             global_symbol(db, ProgramFile::new(db, module, env.program(db)), name)
                 .place
                 .ignore_possibly_undefined()
+        })
+}
+
+/// Return the model that Django's app registry holds under `reference`, `"<app label>.<model>"`,
+/// as in the `AUTH_USER_MODEL` setting.
+///
+/// The registry is the same wherever it is used, so unlike [`app_model_symbol`], this does not
+/// look near a particular file. We look in each of the project's `models` modules (see
+/// [`models_modules`]) whose package has the app label as its last component, which is the label
+/// that Django gives an app by default: the app `shop.library` has the label `library`, and its
+/// models are in `shop.library.models`.
+///
+/// An app that sets a different label in its `AppConfig` is not found, and neither are the apps
+/// of installed packages, such as `django.contrib.auth`.
+pub(super) fn registered_model<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+    reference: &str,
+) -> Option<Type<'db>> {
+    let (app_label, name) = reference.split_once('.')?;
+    let program = env.program(db);
+    models_modules(db, env.resolver_environment(db))
+        .iter()
+        .map(|file| ProgramFile::new(db, *file, program))
+        .filter(|file| {
+            file_to_module(db, file.resolver_file(db)).is_some_and(|module| {
+                let module_name = module.name(db);
+                module_name.last_component() == "models"
+                    && module_name
+                        .parent()
+                        .is_some_and(|package| package.last_component() == app_label)
+            })
+        })
+        .find_map(|file| {
+            let model = global_symbol(db, file, name)
+                .place
+                .ignore_possibly_undefined()?;
+            model_instance(db, env, model)
         })
 }
 
