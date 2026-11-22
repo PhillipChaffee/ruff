@@ -18,7 +18,8 @@ mod relations;
 pub(in crate::types) use fields::is_renamed_field;
 use fields::renamed_field;
 use managers::{
-    bound_manager, from_queryset_return_type, inherited_manager, manager_queryset_method,
+    bound_manager, create_method, from_queryset_return_type, inherited_manager,
+    manager_queryset_method,
 };
 pub(in crate::types) use model::is_automatic_primary_key_member;
 use model::{
@@ -125,16 +126,23 @@ pub(in crate::types) fn synthesized_member<'db>(
     }
 }
 
-/// Return a more precise type for the member `name` of the class `class`, whose type according to the
-/// stubs is `ty`: a relation field whose related model the stubs could not determine, or a manager
-/// that is not yet bound to its model.
+/// Return a more precise type for the member `name` of the class `class`, specialized with
+/// `specialization`, whose type according to the stubs is `ty`: a relation field whose related
+/// model the stubs could not determine, a manager that is not yet bound to its model, or the
+/// `create()` method of a manager or queryset.
 pub(in crate::types) fn refined_class_member<'db>(
     db: &'db dyn Db,
     env: &ProgramEnvironment<'db>,
     class: StaticClassLiteral<'db>,
+    specialization: Option<Specialization<'db>>,
     name: &str,
     ty: Type<'db>,
 ) -> Option<Type<'db>> {
+    if matches!(name, "create" | "acreate")
+        && let Some(method) = create_method(db, env, class, specialization, ty)
+    {
+        return Some(method);
+    }
     if !is_model(db, class) {
         return None;
     }
