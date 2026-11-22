@@ -8,7 +8,9 @@ use ty_python_core::ProgramFile;
 use crate::place::{global_symbol, known_module_symbol};
 use crate::types::call::Binding;
 use crate::types::class::{ClassLiteral, DynamicClassAnchor, DynamicClassLiteral};
-use crate::types::{ClassBase, KnownClass, Specialization, StaticClassLiteral, Type, UnionType};
+use crate::types::{
+    ClassBase, KnownClass, Specialization, StaticClassLiteral, SubclassOfType, Type, UnionType,
+};
 use crate::{Db, ProgramEnvironment};
 
 use super::fields::{Field, model_metadata, own_model_fields};
@@ -343,7 +345,7 @@ fn app_model_symbol<'db>(
 }
 
 /// Return the model that Django's app registry holds under `reference`, `"<app label>.<model>"`,
-/// as in the `AUTH_USER_MODEL` setting.
+/// as in the `AUTH_USER_MODEL` setting and in `apps.get_model()`.
 ///
 /// The registry is the same wherever it is used, so unlike [`app_model_symbol`], this does not
 /// look near a particular file. We look in each of the project's `models` modules (see
@@ -378,6 +380,40 @@ pub(super) fn registered_model<'db>(
                 .ignore_possibly_undefined()?;
             model_instance(db, env, model)
         })
+}
+
+/// Return the type of a call to `Apps.get_model()`, whose overload is `binding`, if it names a
+/// model of the project with string literals.
+///
+/// The stubs return `type[Any]`. The model can be named by the app label and the model name, or
+/// by both in one string:
+/// ```py
+/// reveal_type(apps.get_model("library", "Book"))  # type[Book]
+/// reveal_type(apps.get_model("library.Book"))  # type[Book]
+/// ```
+pub(super) fn get_model_return_type<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+    binding: &Binding<'db>,
+) -> Option<Type<'db>> {
+    let app_label = binding
+        .parameter_type_by_name(db, "app_label", false)
+        .ok()??
+        .as_string_literal()?
+        .value(db);
+    let model_name = binding
+        .parameter_type_by_name(db, "model_name", false)
+        .ok()?
+        .filter(|model_name| !model_name.is_none(db));
+    let model = match model_name {
+        Some(model_name) => registered_model(
+            db,
+            env,
+            &format!("{app_label}.{}", model_name.as_string_literal()?.value(db)),
+        ),
+        None => registered_model(db, env, app_label),
+    }?;
+    Some(SubclassOfType::from(db, env, model.nominal_class(db, env)?))
 }
 
 /// Return a more precise type for the relation field `name` of the model `class`, if the stubs

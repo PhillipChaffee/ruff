@@ -29,9 +29,9 @@ use model::{
 use project::setting;
 pub(in crate::types) use project::type_alias_override;
 use queryset::{annotate_return_type, values_return_type};
-use relations::refined_field_type;
 use relations::reverse_accessor;
 pub(in crate::types) use relations::{foreign_key_model_type, is_foreign_key};
+use relations::{get_model_return_type, refined_field_type};
 
 /// Returns whether `class` is the known class `known` or a subclass of it.
 fn inherits_from<'db>(db: &'db dyn Db, class: StaticClassLiteral<'db>, known: KnownClass) -> bool {
@@ -149,14 +149,19 @@ pub(in crate::types) fn refined_class_member<'db>(
     refined_field_type(db, env, class, name, ty).or_else(|| bound_manager(db, env, class, ty))
 }
 
-/// Return the type of a call to a method of a Django manager or queryset, for the methods whose
-/// result the stubs cannot express: `Manager.from_queryset()`, `annotate()`, `values()` and
-/// `values_list()`. `binding` is the matched overload of the call.
+/// Return the type of a call to a method of a Django manager, queryset or app registry, for the
+/// methods whose result the stubs cannot express: `Manager.from_queryset()`, `annotate()`,
+/// `values()`, `values_list()` and `Apps.get_model()`. `binding` is the matched overload of the
+/// call.
 ///
 /// `annotate()`, `values()` and `values_list()` are only refined when they are called on one of
 /// Django's managers or querysets, as the django-stubs mypy plugin does. A method with the same
 /// name on another class keeps its declared type, even when it returns a `QuerySet`.
-pub(in crate::types) fn queryset_method_return_type<'db>(
+///
+/// `get_model()` is only refined on `Apps` itself. Its subclass `StateApps`, the registry that a
+/// migration receives, holds historical models, which can differ from the models in the source
+/// code.
+pub(in crate::types) fn method_return_type<'db>(
     db: &'db dyn Db,
     env: &ProgramEnvironment<'db>,
     bound_method: BoundMethodType<'db>,
@@ -191,6 +196,13 @@ pub(in crate::types) fn queryset_method_return_type<'db>(
         ),
         "values" | "values_list" if is_django_receiver() => {
             values_return_type(db, env, receiver, binding, arguments)
+        }
+        "get_model"
+            if receiver
+                .nominal_class(db, env)
+                .is_some_and(|class| class.is_known(db, KnownClass::DjangoApps)) =>
+        {
+            get_model_return_type(db, env, binding)
         }
         _ => None,
     }
