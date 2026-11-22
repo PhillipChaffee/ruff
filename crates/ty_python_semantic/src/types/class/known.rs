@@ -167,6 +167,9 @@ pub enum KnownClass {
     DjangoField,
     DjangoDateField,
     DjangoForeignKey,
+    DjangoManyToManyField,
+    DjangoOneToOneField,
+    DjangoLazySettings,
     DjangoBaseManager,
     DjangoQuerySet,
     // Pydantic
@@ -300,6 +303,9 @@ impl KnownClass {
             | Self::DjangoField
             | Self::DjangoDateField
             | Self::DjangoForeignKey
+            | Self::DjangoManyToManyField
+            | Self::DjangoOneToOneField
+            | Self::DjangoLazySettings
             | Self::DjangoBaseManager
             | Self::DjangoQuerySet
             | Self::PydanticBaseModel
@@ -444,6 +450,9 @@ impl KnownClass {
             | Self::DjangoField
             | Self::DjangoDateField
             | Self::DjangoForeignKey
+            | Self::DjangoManyToManyField
+            | Self::DjangoOneToOneField
+            | Self::DjangoLazySettings
             | Self::DjangoBaseManager
             | Self::DjangoQuerySet
             | Self::PydanticBaseModel
@@ -578,6 +587,9 @@ impl KnownClass {
             | KnownClass::DjangoField
             | KnownClass::DjangoDateField
             | KnownClass::DjangoForeignKey
+            | KnownClass::DjangoManyToManyField
+            | KnownClass::DjangoOneToOneField
+            | KnownClass::DjangoLazySettings
             | KnownClass::DjangoBaseManager
             | KnownClass::DjangoQuerySet
             | KnownClass::PydanticBaseModel
@@ -704,6 +716,9 @@ impl KnownClass {
             | KnownClass::DjangoField
             | KnownClass::DjangoDateField
             | KnownClass::DjangoForeignKey
+            | KnownClass::DjangoManyToManyField
+            | KnownClass::DjangoOneToOneField
+            | KnownClass::DjangoLazySettings
             | KnownClass::DjangoBaseManager
             | KnownClass::DjangoQuerySet
             | KnownClass::PydanticBaseModel
@@ -829,6 +844,9 @@ impl KnownClass {
             | KnownClass::DjangoField
             | KnownClass::DjangoDateField
             | KnownClass::DjangoForeignKey
+            | KnownClass::DjangoManyToManyField
+            | KnownClass::DjangoOneToOneField
+            | KnownClass::DjangoLazySettings
             | KnownClass::DjangoBaseManager
             | KnownClass::DjangoQuerySet
             | KnownClass::PydanticBaseModel
@@ -967,6 +985,9 @@ impl KnownClass {
             | Self::DjangoField
             | Self::DjangoDateField
             | Self::DjangoForeignKey
+            | Self::DjangoManyToManyField
+            | Self::DjangoOneToOneField
+            | Self::DjangoLazySettings
             | Self::DjangoBaseManager
             | Self::DjangoQuerySet
             | Self::PydanticBaseModel
@@ -1094,6 +1115,9 @@ impl KnownClass {
             | KnownClass::DjangoField
             | KnownClass::DjangoDateField
             | KnownClass::DjangoForeignKey
+            | KnownClass::DjangoManyToManyField
+            | KnownClass::DjangoOneToOneField
+            | KnownClass::DjangoLazySettings
             | KnownClass::DjangoBaseManager
             | KnownClass::DjangoQuerySet
             | KnownClass::PydanticBaseModel
@@ -1233,6 +1257,9 @@ impl KnownClass {
             Self::DjangoField => "Field",
             Self::DjangoDateField => "DateField",
             Self::DjangoForeignKey => "ForeignKey",
+            Self::DjangoManyToManyField => "ManyToManyField",
+            Self::DjangoOneToOneField => "OneToOneField",
+            Self::DjangoLazySettings => "LazySettings",
             Self::DjangoBaseManager => "BaseManager",
             Self::DjangoQuerySet => "QuerySet",
             Self::PydanticBaseModel => "BaseModel",
@@ -1676,6 +1703,9 @@ impl KnownClass {
             Self::DjangoModel => KnownModule::DjangoDbModelsBase,
             Self::DjangoField | Self::DjangoDateField => KnownModule::DjangoDbModelsFields,
             Self::DjangoForeignKey => KnownModule::DjangoDbModelsFieldsRelated,
+            Self::DjangoManyToManyField => KnownModule::DjangoDbModelsFieldsRelated,
+            Self::DjangoOneToOneField => KnownModule::DjangoDbModelsFieldsRelated,
+            Self::DjangoLazySettings => KnownModule::DjangoConf,
             Self::DjangoBaseManager => KnownModule::DjangoDbModelsManager,
             Self::DjangoQuerySet => KnownModule::DjangoDbModelsQuery,
             Self::PydanticBaseModel => KnownModule::PydanticMain,
@@ -1806,6 +1836,9 @@ impl KnownClass {
             | Self::DjangoField
             | Self::DjangoDateField
             | Self::DjangoForeignKey
+            | Self::DjangoManyToManyField
+            | Self::DjangoOneToOneField
+            | Self::DjangoLazySettings
             | Self::DjangoBaseManager
             | Self::DjangoQuerySet
             | Self::PydanticBaseModel
@@ -1916,6 +1949,9 @@ impl KnownClass {
             "Field" => &[Self::Field, Self::DjangoField],
             "DateField" => &[Self::DjangoDateField],
             "ForeignKey" => &[Self::DjangoForeignKey],
+            "ManyToManyField" => &[Self::DjangoManyToManyField],
+            "OneToOneField" => &[Self::DjangoOneToOneField],
+            "LazySettings" => &[Self::DjangoLazySettings],
             "BaseManager" => &[Self::DjangoBaseManager],
             "QuerySet" => &[Self::DjangoQuerySet],
             "KW_ONLY" => &[Self::KwOnly],
@@ -2048,6 +2084,9 @@ impl KnownClass {
             | Self::DjangoField
             | Self::DjangoDateField
             | Self::DjangoForeignKey
+            | Self::DjangoManyToManyField
+            | Self::DjangoOneToOneField
+            | Self::DjangoLazySettings
             | Self::DjangoBaseManager
             | Self::DjangoQuerySet
             | Self::PydanticBaseModel

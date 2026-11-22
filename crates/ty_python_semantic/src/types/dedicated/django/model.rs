@@ -17,9 +17,9 @@ use crate::types::{
 use crate::{Db, ProgramEnvironment};
 
 use super::fields::{Field, model_metadata, own_model_fields};
-use super::is_model;
 use super::project::project_models;
 use super::relations::{is_foreign_key, refined_field_type, related_model};
+use super::{inherits_from, is_model};
 
 /// Synthesize the `__init__` method of a model, with one keyword parameter per name that Django's
 /// `Model.__init__` accepts.
@@ -90,7 +90,12 @@ pub(super) fn init_method<'db>(
                 continue;
             };
             // Django prohibits assigning to the forward side of a many-to-many relation.
-            if field_class.name(db) == "ManyToManyField" {
+            if field_class
+                .static_class_literal(db)
+                .is_some_and(|(field_class, _)| {
+                    inherits_from(db, field_class, KnownClass::DjangoManyToManyField)
+                })
+            {
                 continue;
             }
             let set_ty = field_class

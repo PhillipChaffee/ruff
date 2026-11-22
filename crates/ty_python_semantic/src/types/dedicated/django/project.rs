@@ -15,7 +15,7 @@ use ty_python_core::{ProgramFile, global_scope, use_def_map};
 
 use crate::place::{global_symbol, known_module_symbol};
 use crate::types::{
-    Parameter, Parameters, Signature, StaticClassLiteral, Type, UnionType, binding_type,
+    KnownClass, Parameter, Parameters, Signature, StaticClassLiteral, Type, UnionType, binding_type,
 };
 use crate::{Db, FxIndexSet, ProgramEnvironment};
 
@@ -36,14 +36,12 @@ pub(super) fn setting<'db>(
     class: StaticClassLiteral<'db>,
     name: &str,
 ) -> Option<Type<'db>> {
-    // Settings are uppercase. Check the names first to avoid a module-resolution query for every
-    // class with an unresolved attribute.
+    // Settings are uppercase. Check the name first, because this runs for every class with an
+    // unresolved attribute.
     let is_setting_name = name.starts_with(|c: char| c.is_ascii_uppercase())
         && !name.contains(|c: char| c.is_ascii_lowercase());
-    if class.name(db) != "LazySettings"
-        || !(is_setting_name || name == "__getattr__")
-        || !file_to_module(db, class.body_scope(db).program_file(db).resolver_file(db))
-            .is_some_and(|module| module.is_known(db, KnownModule::DjangoConf))
+    if !(is_setting_name || name == "__getattr__")
+        || !class.is_known(db, KnownClass::DjangoLazySettings)
     {
         return None;
     }

@@ -816,6 +816,19 @@ def _(author: Author):
     reveal_type(author.profile)  # revealed: Profile
 ```
 
+A subclass of `OneToOneField` also adds a reverse accessor without `_set`:
+
+```py
+class BadgeLink(models.OneToOneField):
+    pass
+
+class Badge(models.Model):
+    author = BadgeLink(Author, on_delete=models.CASCADE)
+
+def _(author: Author):
+    reveal_type(author.badge)  # revealed: Badge
+```
+
 A `related_name` on an abstract model can contain `%(class)s`, which Django replaces with the
 lowercase name of each concrete subclass:
 
@@ -1272,6 +1285,24 @@ def _(author: Author):
     reveal_type(author.books.first())  # revealed: Novel | None
 
 reveal_type(Author.books.through)  # revealed: type[Authorship]
+```
+
+A subclass of `ManyToManyField` behaves the same way, and also cannot be assigned in the
+constructor:
+
+```py
+class TagField(models.ManyToManyField):  # error: [missing-type-argument]
+    pass
+
+class Magazine(models.Model):
+    tags = TagField("Tag")
+
+def _(magazine: Magazine):
+    reveal_type(magazine.tags)  # revealed: ManyRelatedManager[Tag, Magazine_tags]
+
+reveal_type(Magazine.tags.through)  # revealed: type[Magazine_tags]
+
+Magazine(tags=[])  # error: [unknown-argument]
 ```
 
 ## Managers

@@ -30,6 +30,14 @@ use relations::refined_field_type;
 use relations::reverse_accessor;
 pub(in crate::types) use relations::{foreign_key_model_type, is_foreign_key};
 
+/// Returns whether `class` is the known class `known` or a subclass of it.
+fn inherits_from<'db>(db: &'db dyn Db, class: StaticClassLiteral<'db>, known: KnownClass) -> bool {
+    class
+        .iter_mro(db, None)
+        .filter_map(ClassBase::into_class)
+        .any(|base| base.is_known(db, known))
+}
+
 /// Returns whether `class` is a subclass of Django's `Model`.
 pub(in crate::types) fn is_model<'db>(db: &'db dyn Db, class: StaticClassLiteral<'db>) -> bool {
     class
