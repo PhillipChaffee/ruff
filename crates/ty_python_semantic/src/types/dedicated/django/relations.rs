@@ -186,12 +186,13 @@ fn related_manager<'db>(
 }
 
 /// django-stubs annotates `ForeignKey.__init__`'s `to` parameter as `type[Model] | str`.
-/// Use the supplied model class to fill missing read and write types on the descriptor.
+/// Use the supplied model class to fill missing write and read types on the descriptor, in that
+/// order.
 pub(in crate::types) fn foreign_key_model_type<'db>(
     db: &'db dyn Db,
     env: &ProgramEnvironment<'db>,
     binding: &Binding<'db>,
-) -> Option<Type<'db>> {
+) -> Option<(Type<'db>, Type<'db>)> {
     let to = binding.parameter_type_by_name(db, "to", false).ok()??;
     let null = binding.parameter_type_by_name(db, "null", false).ok()?;
     let is_nullable = null.and_then(Type::as_bool_literal) == Some(true);
@@ -203,11 +204,43 @@ pub(in crate::types) fn foreign_key_model_type<'db>(
         None if is_nullable && to.as_string_literal().is_some() => Type::any(),
         None => return None,
     };
-    Some(if is_nullable {
-        UnionType::from_two_elements(db, env, model, Type::none(db, env))
-    } else {
-        model
-    })
+    Some(foreign_key_value_types(db, env, model, is_nullable))
+}
+
+/// Return the write and read types of a foreign key to `model`.
+///
+/// Django checks an assigned instance against the concrete model of the related model, so a
+/// foreign key to a proxy model accepts any instance of the model that the proxy is based on, but
+/// still returns the proxy model:
+/// ```py
+/// class BookProxy(Book):
+///     class Meta:
+///         proxy = True
+///
+/// class Reader(models.Model):
+///     favourite = models.ForeignKey(BookProxy, on_delete=models.CASCADE)
+///
+/// reader.favourite = Book()  # ok
+/// reveal_type(reader.favourite)  # BookProxy
+/// ```
+fn foreign_key_value_types<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+    model: Type<'db>,
+    is_nullable: bool,
+) -> (Type<'db>, Type<'db>) {
+    let write = model
+        .nominal_class(db, env)
+        .and_then(|class| concrete_model(db, class))
+        .map_or(model, |concrete| Type::instance(db, env, concrete));
+    let with_none = |ty| {
+        if is_nullable {
+            UnionType::from_two_elements(db, env, ty, Type::none(db, env))
+        } else {
+            ty
+        }
+    };
+    (with_none(write), with_none(model))
 }
 
 /// Return the model that a relation field of `model` refers to. `declaring` is the class whose
@@ -353,11 +386,7 @@ pub(in crate::types) fn refined_field_type<'db>(
         .iter()
         .find(|field| field.name == name)?;
     let model = related_model(db, env, class, class, field)?;
-    let value = if field.metadata.null {
-        UnionType::from_two_elements(db, env, model, Type::none(db, env))
-    } else {
-        model
-    };
+    let (write, read) = foreign_key_value_types(db, env, model, field.metadata.null);
 
     // Specialize the field class itself, or its nearest generic base class if it is not generic.
     let generic_class = field_class
@@ -373,7 +402,7 @@ pub(in crate::types) fn refined_field_type<'db>(
         db,
         env,
         generic_class.apply_specialization(db, |generic_context| {
-            generic_context.specialize(db, vec![value, value])
+            generic_context.specialize(db, vec![write, read])
         }),
     ))
 }

@@ -508,10 +508,11 @@ impl<'db> ConstructorBinding<'db> {
             if let [write, read] = types.as_mut_slice()
                 && (write.is_none() || read.is_none())
                 && django::is_foreign_key(db, class_literal)
-                && let Some(model) = django::foreign_key_model_type(db, env, overload)
+                && let Some((write_model, read_model)) =
+                    django::foreign_key_model_type(db, env, overload)
             {
-                write.get_or_insert(model);
-                read.get_or_insert(model);
+                write.get_or_insert(write_model);
+                read.get_or_insert(read_model);
             }
             if let Some(previous) = &mut combined {
                 for (previous, inferred) in previous.iter_mut().zip(types) {
