@@ -34,8 +34,32 @@ pub(in crate::types) fn is_foreign_key<'db>(
 /// An attribute that a relation field adds to the model it refers to.
 #[derive(Debug, Clone, PartialEq, Eq, get_size2::GetSize, salsa::SalsaValue)]
 struct ReverseAccessor<'db> {
-    pub(super) name: Name,
-    pub(super) ty: Type<'db>,
+    name: Name,
+    ty: Type<'db>,
+}
+
+/// A relation to a model from a field of another model, or from a model that inherits from it.
+#[derive(Debug, Clone, PartialEq, Eq, get_size2::GetSize, salsa::SalsaValue)]
+pub(super) struct IncomingRelation<'db> {
+    /// The model that declares or inherits the relation field, or the child model.
+    pub(super) source: StaticClassLiteral<'db>,
+    /// The attribute that the relation adds to the model, if we synthesize one.
+    accessor: Option<ReverseAccessor<'db>>,
+    /// The name of the relation in queries, as in `Author.objects.filter(book__title="Dune")`, or
+    /// `None` if the relation is hidden.
+    pub(super) query_name: Option<Name>,
+    /// Whether a row of the model has at most one related row of `source`.
+    pub(super) is_one_to_one: bool,
+}
+
+/// The relations that the project's models have to a model.
+#[derive(Debug, Clone, Default, PartialEq, Eq, get_size2::GetSize, salsa::SalsaValue)]
+pub(super) struct IncomingRelations<'db> {
+    pub(super) relations: Box<[IncomingRelation<'db>]>,
+    /// Whether we know the query names of every relation to the model. A relation whose related
+    /// model we cannot resolve might refer to the model, and a name that contains the app label
+    /// is unknown, because we do not know the app label of a model.
+    pub(super) is_complete: bool,
 }
 
 /// Synthesize the reverse accessors of a model.
@@ -63,27 +87,45 @@ pub(super) fn reverse_accessor<'db>(
     class: StaticClassLiteral<'db>,
     name: &str,
 ) -> Option<Type<'db>> {
-    reverse_accessors(db, class)
+    incoming_relations(db, class)
+        .relations
         .iter()
+        .filter_map(|relation| relation.accessor.as_ref())
         .find(|accessor| accessor.name == name)
         .map(|accessor| accessor.ty)
 }
 
-/// All reverse accessors that the project's models add to `class`.
-#[salsa::tracked(returns(deref), cycle_initial=|_, _, _| Box::default(), heap_size=ruff_memory_usage::heap_size)]
-fn reverse_accessors<'db>(
+/// All relations that the project's models have to `class`.
+///
+/// A relation is named in queries by the `related_query_name` of its field, or else by its
+/// `related_name`, or else by the lowercase name of the source model. This differs from the name
+/// of the reverse accessor, which ends with `_set` by default for a `ForeignKey`:
+/// ```py
+/// class Book(models.Model):
+///     author = models.ForeignKey(Author, on_delete=models.CASCADE)
+///
+/// Author().book_set  # the reverse accessor
+/// Author.objects.filter(book__title="Dune")  # the query name
+/// ```
+///
+/// Django attaches the relations to a proxy model to the concrete model that the proxy is based
+/// on, so these relations have a query name on `class` but no reverse accessor.
+#[salsa::tracked(returns(ref), cycle_initial=|_, _, _| IncomingRelations::default(), heap_size=ruff_memory_usage::heap_size)]
+pub(super) fn incoming_relations<'db>(
     db: &'db dyn Db,
     class: StaticClassLiteral<'db>,
-) -> Box<[ReverseAccessor<'db>]> {
+) -> IncomingRelations<'db> {
     let file = class.body_scope(db).program_file(db);
     let env = ProgramEnvironment::from_file(file);
     let target = Type::instance(db, &env, class.default_specialization(db));
+    let concrete_target = concrete_model(db, class.default_specialization(db));
 
     let sources = project_models(db, file)
         // Abstract models have no table, so nothing can refer to their rows.
         .filter(|source| !model_metadata(db, *source).is_abstract);
 
-    let mut accessors = Vec::new();
+    let mut relations = Vec::new();
+    let mut is_complete = true;
     for source in sources {
         let source_name = source.name(db).to_lowercase();
         let source_ty = Type::instance(db, &env, source.default_specialization(db));
@@ -99,9 +141,14 @@ fn reverse_accessors<'db>(
                     parent.static_class_literal(db).map(|(parent, _)| parent) == Some(class)
                 })
         {
-            accessors.push(ReverseAccessor {
-                name: Name::new(&source_name),
-                ty: source_ty,
+            relations.push(IncomingRelation {
+                source,
+                accessor: Some(ReverseAccessor {
+                    name: Name::new(&source_name),
+                    ty: source_ty,
+                }),
+                query_name: Some(Name::new(&source_name)),
+                is_one_to_one: true,
             });
         }
 
@@ -123,40 +170,94 @@ fn reverse_accessors<'db>(
                 else {
                     continue;
                 };
-                if !is_foreign_key(db, field_class)
-                    || related_model(db, &env, declaring, source, field) != Some(target)
+                let is_many_to_many =
+                    inherits_from(db, field_class, KnownClass::DjangoManyToManyField);
+                if !(is_foreign_key(db, field_class) || is_many_to_many) {
+                    continue;
+                }
+                let Some(related) = related_model(db, &env, declaring, source, field) else {
+                    // An unresolved reference such as `"library.Book"` might name `class`.
+                    if field
+                        .to
+                        .and_then(Type::as_string_literal)
+                        .is_some_and(|reference| {
+                            let reference = reference.value(db);
+                            let model_name = reference
+                                .rsplit_once('.')
+                                .map_or(reference, |(_, name)| name);
+                            model_name.eq_ignore_ascii_case(class.name(db))
+                        })
+                    {
+                        is_complete = false;
+                    }
+                    continue;
+                };
+                let is_target = related == target;
+                if !is_target
+                    && (concrete_target.is_none()
+                        || related
+                            .nominal_class(db, &env)
+                            .and_then(|related| concrete_model(db, related))
+                            != concrete_target)
                 {
                     continue;
                 }
+
                 let is_one_to_one = inherits_from(db, field_class, KnownClass::DjangoOneToOneField);
-                let name = match field.metadata.related_name.as_deref() {
-                    // A name that ends with `+` disables the reverse accessor. We do not know the
-                    // app label of a model.
-                    Some(related_name)
-                        if related_name.ends_with('+')
-                            || related_name.contains("%(app_label)s") =>
-                    {
-                        continue;
+                let metadata = &field.metadata;
+                // A name that ends with `+` hides the relation. We do not know the app label of a
+                // model.
+                let substitute = |name: &str| {
+                    if name.contains("%(app_label)s") {
+                        None
+                    } else {
+                        Some(name.replace("%(class)s", &source_name))
                     }
-                    Some(related_name) => related_name.replace("%(class)s", &source_name),
-                    None if is_one_to_one => source_name.clone(),
-                    None => format!("{source_name}_set"),
                 };
-                let ty = if is_one_to_one {
+                let related_name = metadata.related_name.as_deref();
+                let query_name = match metadata.related_query_name.as_deref().or(related_name) {
+                    Some(name) if name.ends_with('+') => None,
+                    Some(name) => {
+                        let name = substitute(name);
+                        is_complete &= name.is_some();
+                        name
+                    }
+                    None => Some(source_name.clone()),
+                };
+                let accessor_name = match related_name {
+                    Some(name) if name.ends_with('+') => None,
+                    Some(name) => substitute(name),
+                    None if is_one_to_one => Some(source_name.clone()),
+                    None => Some(format!("{source_name}_set")),
+                };
+                let accessor_ty = if is_one_to_one {
                     Some(source_ty)
+                } else if is_many_to_many {
+                    None
                 } else {
                     related_manager(db, &env, source_ty)
                 };
-                if let Some(ty) = ty {
-                    accessors.push(ReverseAccessor {
-                        name: Name::new(name),
-                        ty,
-                    });
-                }
+                let accessor =
+                    accessor_name
+                        .zip(accessor_ty)
+                        .filter(|_| is_target)
+                        .map(|(name, ty)| ReverseAccessor {
+                            name: Name::new(name),
+                            ty,
+                        });
+                relations.push(IncomingRelation {
+                    source,
+                    accessor,
+                    query_name: query_name.map(Name::new),
+                    is_one_to_one,
+                });
             }
         }
     }
-    accessors.into_boxed_slice()
+    IncomingRelations {
+        relations: relations.into_boxed_slice(),
+        is_complete,
+    }
 }
 
 /// Return the type of the manager that a `ForeignKey` adds to its related model.
