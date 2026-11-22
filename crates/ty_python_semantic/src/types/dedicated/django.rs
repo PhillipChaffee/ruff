@@ -28,8 +28,8 @@ use model::{
 };
 use project::setting;
 pub(in crate::types) use project::type_alias_override;
-pub(in crate::types) use queryset::constructed_instance_type;
 use queryset::{annotate_return_type, values_return_type};
+pub(in crate::types) use queryset::{constructed_instance_type, type_alias_value_override};
 use relations::reverse_accessor;
 pub(in crate::types) use relations::{foreign_key_model_type, is_foreign_key};
 use relations::{get_model_return_type, refined_field_type};

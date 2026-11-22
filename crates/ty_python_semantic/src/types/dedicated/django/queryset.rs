@@ -4,6 +4,7 @@ use ruff_python_ast::name::Name;
 use ty_module_resolver::{KnownModule, file_to_module};
 
 use crate::types::call::{Argument, Binding, CallArguments};
+use crate::types::type_alias::TypeAliasType;
 use crate::types::typed_dict::{TypedDictFieldBuilder, TypedDictType};
 use crate::types::{ClassBase, IntersectionType, KnownClass, Type};
 use crate::{Db, ProgramEnvironment};
@@ -179,6 +180,52 @@ fn annotated_queryset<'db, 'a>(
             db, env, declared, queryset,
         ))
     }
+}
+
+/// Return the value of `WithAnnotations[Article, TitleLength]` from django-stubs-ext, the model
+/// `Article` with the items of the `TypedDict` `TitleLength` as attributes:
+/// ```py
+/// class TitleLength(TypedDict):
+///     title_length: int
+///
+/// def _(article: WithAnnotations[Article, TitleLength]):
+///     article.title_length  # int
+/// ```
+///
+/// django-stubs-ext declares the alias as `Annotated[_T, Annotations[_Annotations_co]]`, whose
+/// value is the model alone, because the metadata of `Annotated` is not part of the type. We give
+/// it the same type as a model that `annotate()` adds the attributes to.
+///
+/// Returns `None`, which keeps the value of the alias, for other aliases and for an alias that is
+/// not specialized with a model and a `TypedDict`.
+pub(in crate::types) fn type_alias_value_override<'db>(
+    db: &'db dyn Db,
+    alias: TypeAliasType<'db>,
+) -> Option<Type<'db>> {
+    // Check the name first to avoid a module-resolution query for every type alias.
+    if alias.name(db) != "WithAnnotations" {
+        return None;
+    }
+    let definition = alias.definition(db);
+    let file = definition.program_file(db);
+    if !file_to_module(db, file.resolver_file(db))
+        .is_some_and(|module| module.is_known(db, KnownModule::DjangoStubsExtAnnotations))
+    {
+        return None;
+    }
+    let &[model, Type::TypedDict(annotations)] = alias.specialization(db)?.types(db) else {
+        return None;
+    };
+    let env = ProgramEnvironment::from_file(file);
+    annotated_model(
+        db,
+        &env,
+        model,
+        annotations
+            .items(db)
+            .iter()
+            .map(|(name, field)| (name.as_str(), field.declared_ty)),
+    )
 }
 
 /// Add `attributes` to the model instance type `model`, as the intersection of the model with a

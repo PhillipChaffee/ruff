@@ -9,6 +9,7 @@ use crate::{
         RecursiveType, Type, TypeContext, TypeMapping, TypeRecursionContext, TypingModule,
         UnionType, VarianceTerm,
         cyclic::CycleDetector,
+        dedicated::django,
         definition_expression_type,
         display::qualified_name_components_from_scope,
         factory_name_argument,
@@ -369,7 +370,9 @@ impl<'db> ManualPEP695TypeAliasType<'db> {
         heap_size=ruff_memory_usage::heap_size
     )]
     fn value_type(self, db: &'db dyn Db) -> Type<'db> {
-        TypeAliasType::ManualPEP695(self).specialized_value_type(db, None)
+        let alias = TypeAliasType::ManualPEP695(self);
+        django::type_alias_value_override(db, alias)
+            .unwrap_or_else(|| alias.specialized_value_type(db, None))
     }
 
     /// The value type of this manual type alias with no specialization applied.
