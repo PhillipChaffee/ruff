@@ -317,12 +317,13 @@ pub(in crate::types) fn is_renamed_field<'db>(
     name: &str,
     ty: Type<'db>,
 ) -> bool {
-    ty.nominal_class(db, env).is_some_and(|field_class| {
-        field_class
-            .iter_mro(db)
-            .filter_map(ClassBase::into_class)
-            .any(|base| base.is_known(db, KnownClass::DjangoField))
-    }) && is_model(db, class)
+    is_model(db, class)
+        && ty.nominal_class(db, env).is_some_and(|field_class| {
+            field_class
+                .iter_mro(db)
+                .filter_map(ClassBase::into_class)
+                .any(|base| base.is_known(db, KnownClass::DjangoField))
+        })
         && own_model_fields(db, class)
             .iter()
             .any(|field| field.symbol == name && field.name != name)
