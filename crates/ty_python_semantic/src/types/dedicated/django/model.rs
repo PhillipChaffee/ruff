@@ -25,8 +25,8 @@ use super::{inherits_from, is_model};
 /// `Model.__init__` accepts.
 ///
 /// The stubs declare `Model.__init__(self, *args: Any, **kwargs: Any)`. Django itself rejects a
-/// keyword that names neither a field nor a property, so `Book(title="Dune")` raises a `TypeError`
-/// here:
+/// keyword that names neither a field nor a property, so `Book(subtitle="Dune")` raises a
+/// `TypeError` here:
 /// ```py
 /// class Book(models.Model):
 ///     title = models.CharField(max_length=200)
