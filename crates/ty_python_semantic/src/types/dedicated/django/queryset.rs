@@ -1,15 +1,17 @@
-//! The rows of `values()` and `values_list()`, and the attributes that `annotate()` adds.
+//! The rows of `values()` and `values_list()`, and the attributes that `annotate()`,
+//! `prefetch_related()` and django-stubs-ext's `WithAnnotations` add to model instances.
 
 use ruff_python_ast::name::Name;
 use ty_module_resolver::{KnownModule, file_to_module};
 
+use crate::place::known_module_symbol;
 use crate::types::call::{Argument, Binding, CallArguments};
 use crate::types::type_alias::TypeAliasType;
 use crate::types::typed_dict::{TypedDictFieldBuilder, TypedDictType};
-use crate::types::{ClassBase, IntersectionType, KnownClass, Type};
+use crate::types::{ClassBase, IntersectionType, KnownClass, Specialization, Type};
 use crate::{Db, ProgramEnvironment};
 
-use super::inherits_from;
+use super::{inherits_from, is_model};
 
 /// Return the type of the instance that a call to the constructor of a Django aggregate such as
 /// `Count` creates, with the name that `annotate()` gives the aggregate when it is passed as a
@@ -153,12 +155,9 @@ fn annotated_queryset<'db, 'a>(
     attributes: impl IntoIterator<Item = (&'a str, Type<'db>)>,
 ) -> Option<Type<'db>> {
     let class = declared.nominal_class(db, env)?;
-    let (_, specialization) = class
-        .iter_mro(db)
-        .filter_map(ClassBase::into_class)
-        .filter_map(|base| base.static_class_literal(db))
-        .find(|(base, _)| base.is_known(db, KnownClass::DjangoQuerySet))?;
-    let &[model, row] = specialization?.types(db) else {
+    let &[model, row] =
+        base_specialization(db, env, declared, KnownClass::DjangoQuerySet)?.types(db)
+    else {
         return None;
     };
     let annotated = annotated_model(db, env, model, attributes)?;
@@ -180,6 +179,108 @@ fn annotated_queryset<'db, 'a>(
             db, env, declared, queryset,
         ))
     }
+}
+
+/// Add the attributes that `QuerySet.prefetch_related()` creates for the `Prefetch` objects with a
+/// `to_attr` to the model of the `QuerySet` it returns.
+///
+/// Django stores the related objects of such a lookup in a list on each instance:
+/// ```py
+/// author = Author.objects.prefetch_related(Prefetch("books", to_attr="book_list")).get()
+/// author.book_list  # list[Book]
+/// ```
+///
+/// The related model is the model of the `queryset` of the `Prefetch` object, or else the model
+/// that the lookup names (see [`related_model`]). We do not add an attribute for a lookup that
+/// spans a relation, such as `"books__chapters"`, because Django sets it on the related objects.
+pub(super) fn prefetch_related_return_type<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+    receiver: Type<'db>,
+    binding: &Binding<'db>,
+    arguments: &CallArguments<'_, 'db>,
+) -> Option<Type<'db>> {
+    let declared = binding.return_type();
+    let model = *base_specialization(db, env, declared, KnownClass::DjangoQuerySet)?
+        .types(db)
+        .first()?;
+    let prefetch = known_module_symbol(db, env, KnownModule::DjangoDbModelsQuery, "Prefetch")
+        .place
+        .ignore_possibly_undefined()?
+        .as_class_literal()?
+        .as_static()?;
+
+    // The matched arguments include the bound `self` argument.
+    let arguments = arguments.with_self(Some(receiver));
+    let (lookups, _) = binding.signature.parameters().variadic()?;
+    let attributes = binding
+        .arguments_for_parameter(&arguments, lookups)
+        .filter_map(|(_, ty)| {
+            let &[lookup, queryset, to_attr] = ty.specialization_of(db, env, prefetch)?.types(db)
+            else {
+                return None;
+            };
+            let to_attr = to_attr.as_string_literal()?.value(db);
+            let lookup = lookup.as_string_literal()?.value(db);
+            if lookup.contains("__") {
+                return None;
+            }
+            // Without a `queryset`, its type is the default `QuerySet[Model]`.
+            let related = base_specialization(db, env, queryset, KnownClass::DjangoQuerySet)
+                .and_then(|specialization| specialization.types(db).first().copied())
+                .filter(|related| {
+                    !related
+                        .nominal_class(db, env)
+                        .is_some_and(|class| class.is_known(db, KnownClass::DjangoModel))
+                })
+                .or_else(|| related_model(db, env, model, lookup))
+                .unwrap_or_else(Type::any);
+            Some((
+                to_attr,
+                KnownClass::List.to_specialized_instance(db, env, &[related]),
+            ))
+        })
+        .collect::<Vec<_>>();
+    annotated_queryset(db, env, declared, attributes)
+}
+
+/// Return the model of the related objects that the relation `lookup` of `model` gives: the
+/// model of a related manager, such as a reverse accessor or a many-to-many field, or the model
+/// of a foreign key.
+fn related_model<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+    model: Type<'db>,
+    lookup: &str,
+) -> Option<Type<'db>> {
+    let related = model
+        .member(db, env, lookup)
+        .place
+        .ignore_possibly_undefined()?;
+    if let Some(manager) = base_specialization(db, env, related, KnownClass::DjangoBaseManager) {
+        return manager.types(db).first().copied();
+    }
+    related
+        .nominal_class(db, env)?
+        .static_class_literal(db)
+        .is_some_and(|(class, _)| is_model(db, class))
+        .then_some(related)
+}
+
+/// Return the type arguments of the class `known` in the MRO of the class of the instance type
+/// `ty`, such as the model and row types of a custom `QuerySet` class.
+fn base_specialization<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+    ty: Type<'db>,
+    known: KnownClass,
+) -> Option<Specialization<'db>> {
+    ty.nominal_class(db, env)?
+        .iter_mro(db)
+        .filter_map(ClassBase::into_class)
+        .filter_map(|base| base.static_class_literal(db))
+        .find(|(base, _)| base.is_known(db, known))?
+        .1
 }
 
 /// Return the value of `WithAnnotations[Article, TitleLength]` from django-stubs-ext, the model
