@@ -228,17 +228,64 @@ fn meta_setting<'db>(
     meta: StaticClassLiteral<'db>,
     name: &str,
 ) -> Option<bool> {
+    meta_value(db, env, meta, name).map(|value| value == Type::bool_literal(true))
+}
+
+/// Return the name of the manager that `Meta.default_manager_name` of the model `class` names.
+///
+/// Django reads the option from the model's own `Meta` class, or else from the `Meta` class that
+/// the model inherits from an abstract base class, and a `Meta` class can inherit the option from
+/// its own base classes:
+/// ```py
+/// class Book(models.Model):
+///     objects = models.Manager()
+///     published = PublishedManager()
+///
+///     class Meta:
+///         default_manager_name = "published"
+/// ```
+pub(super) fn default_manager_name<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+    class: StaticClassLiteral<'db>,
+) -> Option<&'db str> {
+    // Django removes the `Meta` class from a model that is not abstract, so a model only inherits
+    // the `Meta` class of an abstract model.
+    let meta = class
+        .iter_mro(db, None)
+        .filter_map(ClassBase::into_class)
+        .filter_map(|base| base.static_class_literal(db))
+        .map(|(base, _)| base)
+        .filter(|base| {
+            *base == class || (is_model(db, *base) && model_metadata(db, *base).is_abstract)
+        })
+        .find_map(|base| own_meta(db, base))?;
+    let name = meta
+        .iter_mro(db, None)
+        .filter_map(ClassBase::into_class)
+        .map_while(|meta_base| meta_base.static_class_literal(db))
+        .find_map(|(meta_base, _)| meta_value(db, env, meta_base, "default_manager_name"))?;
+    Some(name.as_string_literal()?.value(db))
+}
+
+/// Return the type of the value that the body of the `Meta` class `meta` assigns to `name`.
+fn meta_value<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+    meta: StaticClassLiteral<'db>,
+    name: &str,
+) -> Option<Type<'db>> {
     let scope = meta.body_scope(db);
     let symbol = place_table(db, scope).symbol_id(name)?;
-    // The public type is widened to `bool`, so read the bindings' literal values instead.
-    let value = place_from_bindings(
+    // The public type of a literal is widened, such as `True` to `bool`, so read the bindings'
+    // literal values instead.
+    place_from_bindings(
         db,
         env,
         use_def_map(db, scope).end_of_scope_symbol_bindings(symbol),
     )
     .place
-    .ignore_possibly_undefined()?;
-    Some(value == Type::bool_literal(true))
+    .ignore_possibly_undefined()
 }
 
 fn own_meta<'db>(
