@@ -305,6 +305,8 @@ pub enum KnownModule {
     DjangoFormsForms,
     #[strum(serialize = "django.utils.choices")]
     DjangoUtilsChoices,
+    #[strum(serialize = "django_stubs_ext.annotations")]
+    DjangoStubsExtAnnotations,
     #[strum(serialize = "pydantic.config")]
     PydanticConfig,
     #[strum(serialize = "pydantic.fields")]
@@ -380,6 +382,7 @@ impl KnownModule {
             Self::DjangoDbModelsQuery => "django.db.models.query",
             Self::DjangoFormsForms => "django.forms.forms",
             Self::DjangoUtilsChoices => "django.utils.choices",
+            Self::DjangoStubsExtAnnotations => "django_stubs_ext.annotations",
             Self::PydanticConfig => "pydantic.config",
             Self::PydanticFields => "pydantic.fields",
             Self::PydanticFunctionalValidators => "pydantic.functional_validators",
@@ -428,6 +431,7 @@ impl KnownModule {
             | Self::DjangoDbModelsQuery
             | Self::DjangoFormsForms
             | Self::DjangoUtilsChoices
+            | Self::DjangoStubsExtAnnotations
             | Self::PydanticConfig
             | Self::PydanticFields
             | Self::PydanticFunctionalValidators
