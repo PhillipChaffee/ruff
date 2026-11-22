@@ -22,9 +22,9 @@ use crate::types::infer::nearest_enclosing_class;
 use crate::types::member::class_member;
 use crate::types::typed_dict::{TypedDictFieldBuilder, TypedDictType};
 use crate::types::{
-    BindingContext, BoundTypeVarInstance, ClassBase, ClassType, FunctionType, GenericContext,
-    IntersectionType, KnownClass, Parameter, Parameters, SelfTypeVarOrigin, Signature,
-    Specialization, StaticClassLiteral, Type, UnionType, binding_type, definition_expression_type,
+    BindingContext, BoundTypeVarInstance, ClassBase, ClassType, GenericContext, IntersectionType,
+    KnownClass, Parameter, Parameters, SelfTypeVarOrigin, Signature, Specialization,
+    StaticClassLiteral, Type, UnionType, binding_type, definition_expression_type,
 };
 use crate::{Db, FxIndexSet, ProgramEnvironment};
 
@@ -1312,52 +1312,6 @@ pub(in crate::types) fn type_alias_override<'db>(
             instance_of(KnownModule::DjangoDbModelsEnums, "ChoicesType")?,
         )),
     }
-}
-
-/// Return the class that a call to `function` returns, if it is
-/// `django.contrib.auth.get_user_model`.
-///
-/// The stubs declare the return type as `type[_User]`. A variable of that type is not a class
-/// that can be used in a type expression, which rejects the common pattern of annotating with
-/// the result:
-/// ```py
-/// User = get_user_model()
-///
-/// def greet(user: User) -> str: ...
-/// ```
-///
-/// We return the class `AbstractUser` itself. See [`type_alias_override`] for why it stands in for
-/// the user model.
-pub(in crate::types) fn user_model_class<'db>(
-    db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
-    function: FunctionType<'db>,
-) -> Option<Type<'db>> {
-    if !is_get_user_model(db, function) {
-        return None;
-    }
-    known_module_symbol(
-        db,
-        env,
-        KnownModule::DjangoContribAuthModels,
-        "AbstractUser",
-    )
-    .place
-    .ignore_possibly_undefined()
-}
-
-/// Returns whether `function` is `django.contrib.auth.get_user_model`.
-pub(in crate::types) fn is_get_user_model<'db>(
-    db: &'db dyn Db,
-    function: FunctionType<'db>,
-) -> bool {
-    // Check the name first to avoid a module-resolution query for every function.
-    function.name(db) == "get_user_model"
-        && file_to_module(
-            db,
-            function.definition(db).program_file(db).resolver_file(db),
-        )
-        .is_some_and(|module| module.name(db).as_str() == "django.contrib.auth")
 }
 
 /// Return the manager class that `Manager.from_queryset()` creates.

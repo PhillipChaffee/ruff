@@ -2347,13 +2347,6 @@ impl<'db> Bindings<'db> {
                         )));
                     }
 
-                    Type::FunctionLiteral(function_type)
-                        if let Some(user_model) =
-                            django::user_model_class(db, env, function_type) =>
-                    {
-                        overload.set_return_type(user_model);
-                    }
-
                     Type::FunctionLiteral(function_type) => match function_type.known(db) {
                         Some(KnownFunction::IsEquivalentTo) => {
                             if let [Some(ty_a), Some(ty_b)] = overload.parameter_types() {
