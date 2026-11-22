@@ -2,7 +2,7 @@
 //!
 //! The members that Django creates at runtime are synthesized by [`synthesized_member`].
 
-use crate::types::call::{Argument, Binding, CallArguments};
+use crate::types::call::{Binding, CallArguments};
 use crate::types::{
     BoundMethodType, ClassBase, KnownClass, Specialization, StaticClassLiteral, Type,
 };
@@ -28,6 +28,7 @@ use model::{
 };
 use project::setting;
 pub(in crate::types) use project::type_alias_override;
+pub(in crate::types) use queryset::constructed_instance_type;
 use queryset::{annotate_return_type, values_return_type};
 use relations::reverse_accessor;
 pub(in crate::types) use relations::{foreign_key_model_type, is_foreign_key};
@@ -186,17 +187,9 @@ pub(in crate::types) fn method_return_type<'db>(
     };
     match function.name(db).as_str() {
         "from_queryset" => from_queryset_return_type(db, env, receiver, binding),
-        "annotate" if is_django_receiver() => annotate_return_type(
-            db,
-            env,
-            binding.return_type(),
-            arguments
-                .iter()
-                .filter_map(|argument| match argument.kind() {
-                    Argument::Keyword(name) => Some(name),
-                    _ => None,
-                }),
-        ),
+        "annotate" if is_django_receiver() => {
+            annotate_return_type(db, env, receiver, binding, arguments)
+        }
         "values" | "values_list" if is_django_receiver() => {
             values_return_type(db, env, receiver, binding, arguments)
         }

@@ -174,6 +174,7 @@ pub enum KnownClass {
     DjangoQuerySet,
     DjangoBaseForm,
     DjangoApps,
+    DjangoAggregate,
     // Pydantic
     PydanticBaseModel,
     PydanticBaseSettings,
@@ -312,6 +313,7 @@ impl KnownClass {
             | Self::DjangoQuerySet
             | Self::DjangoBaseForm
             | Self::DjangoApps
+            | Self::DjangoAggregate
             | Self::PydanticBaseModel
             | Self::PydanticBaseSettings
             | Self::PydanticConfigDict
@@ -461,6 +463,7 @@ impl KnownClass {
             | Self::DjangoQuerySet
             | Self::DjangoBaseForm
             | Self::DjangoApps
+            | Self::DjangoAggregate
             | Self::PydanticBaseModel
             | Self::PydanticBaseSettings
             | Self::PydanticConfigDict
@@ -600,6 +603,7 @@ impl KnownClass {
             | KnownClass::DjangoQuerySet
             | KnownClass::DjangoBaseForm
             | KnownClass::DjangoApps
+            | KnownClass::DjangoAggregate
             | KnownClass::PydanticBaseModel
             | KnownClass::PydanticBaseSettings
             | KnownClass::PydanticConfigDict
@@ -731,6 +735,7 @@ impl KnownClass {
             | KnownClass::DjangoQuerySet
             | KnownClass::DjangoBaseForm
             | KnownClass::DjangoApps
+            | KnownClass::DjangoAggregate
             | KnownClass::PydanticBaseModel
             | KnownClass::PydanticBaseSettings
             | KnownClass::PydanticRootModel
@@ -861,6 +866,7 @@ impl KnownClass {
             | KnownClass::DjangoQuerySet
             | KnownClass::DjangoBaseForm
             | KnownClass::DjangoApps
+            | KnownClass::DjangoAggregate
             | KnownClass::PydanticBaseModel
             | KnownClass::PydanticBaseSettings
             | KnownClass::PydanticConfigDict
@@ -1004,6 +1010,7 @@ impl KnownClass {
             | Self::DjangoQuerySet
             | Self::DjangoBaseForm
             | Self::DjangoApps
+            | Self::DjangoAggregate
             | Self::PydanticBaseModel
             | Self::PydanticBaseSettings
             | Self::PydanticConfigDict
@@ -1136,6 +1143,7 @@ impl KnownClass {
             | KnownClass::DjangoQuerySet
             | KnownClass::DjangoBaseForm
             | KnownClass::DjangoApps
+            | KnownClass::DjangoAggregate
             | KnownClass::PydanticBaseModel
             | KnownClass::PydanticBaseSettings
             | KnownClass::PydanticConfigDict
@@ -1280,6 +1288,7 @@ impl KnownClass {
             Self::DjangoQuerySet => "QuerySet",
             Self::DjangoBaseForm => "BaseForm",
             Self::DjangoApps => "Apps",
+            Self::DjangoAggregate => "Aggregate",
             Self::PydanticBaseModel => "BaseModel",
             Self::PydanticBaseSettings => "BaseSettings",
             Self::PydanticConfigDict => "ConfigDict",
@@ -1728,6 +1737,7 @@ impl KnownClass {
             Self::DjangoQuerySet => KnownModule::DjangoDbModelsQuery,
             Self::DjangoBaseForm => KnownModule::DjangoFormsForms,
             Self::DjangoApps => KnownModule::DjangoAppsRegistry,
+            Self::DjangoAggregate => KnownModule::DjangoDbModelsAggregates,
             Self::PydanticBaseModel => KnownModule::PydanticMain,
             Self::PydanticBaseSettings | Self::PydanticSettingsConfigDict => {
                 KnownModule::PydanticSettingsMain
@@ -1863,6 +1873,7 @@ impl KnownClass {
             | Self::DjangoQuerySet
             | Self::DjangoBaseForm
             | Self::DjangoApps
+            | Self::DjangoAggregate
             | Self::PydanticBaseModel
             | Self::PydanticBaseSettings
             | Self::PydanticConfigDict
@@ -1978,6 +1989,7 @@ impl KnownClass {
             "QuerySet" => &[Self::DjangoQuerySet],
             "BaseForm" => &[Self::DjangoBaseForm],
             "Apps" => &[Self::DjangoApps],
+            "Aggregate" => &[Self::DjangoAggregate],
             "KW_ONLY" => &[Self::KwOnly],
             "NamedTupleFallback" => &[Self::NamedTupleFallback],
             "NamedTupleLike" => &[Self::NamedTupleLike],
@@ -2115,6 +2127,7 @@ impl KnownClass {
             | Self::DjangoQuerySet
             | Self::DjangoBaseForm
             | Self::DjangoApps
+            | Self::DjangoAggregate
             | Self::PydanticBaseModel
             | Self::PydanticBaseSettings
             | Self::PydanticConfigDict
