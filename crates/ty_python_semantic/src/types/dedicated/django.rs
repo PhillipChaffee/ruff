@@ -28,7 +28,7 @@ use model::{
 };
 use project::setting;
 pub(in crate::types) use project::type_alias_override;
-use queryset::{annotate_return_type, values_return_type};
+use queryset::{annotate_return_type, prefetch_related_return_type, values_return_type};
 pub(in crate::types) use queryset::{constructed_instance_type, type_alias_value_override};
 use relations::reverse_accessor;
 pub(in crate::types) use relations::{foreign_key_model_type, is_foreign_key};
@@ -155,10 +155,10 @@ pub(in crate::types) fn refined_class_member<'db>(
 
 /// Return the type of a call to a method of a Django manager, queryset or app registry, for the
 /// methods whose result the stubs cannot express: `Manager.from_queryset()`, `annotate()`,
-/// `values()`, `values_list()` and `Apps.get_model()`. `binding` is the matched overload of the
-/// call.
+/// `prefetch_related()`, `values()`, `values_list()` and `Apps.get_model()`. `binding` is the
+/// matched overload of the call.
 ///
-/// `annotate()`, `values()` and `values_list()` are only refined when they are called on one of
+/// The methods other than `from_queryset()` are only refined when they are called on one of
 /// Django's managers or querysets, as the django-stubs mypy plugin does. A method with the same
 /// name on another class keeps its declared type, even when it returns a `QuerySet`.
 ///
@@ -189,6 +189,9 @@ pub(in crate::types) fn method_return_type<'db>(
         "from_queryset" => from_queryset_return_type(db, env, receiver, binding),
         "annotate" if is_django_receiver() => {
             annotate_return_type(db, env, receiver, binding, arguments)
+        }
+        "prefetch_related" if is_django_receiver() => {
+            prefetch_related_return_type(db, env, receiver, binding, arguments)
         }
         "values" | "values_list" if is_django_receiver() => {
             values_return_type(db, env, receiver, binding, arguments)
