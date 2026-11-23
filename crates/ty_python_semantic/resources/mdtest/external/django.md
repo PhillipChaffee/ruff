@@ -2083,6 +2083,65 @@ def _(book: Book):
     book.id = "1"  # ok
 ```
 
+A field also accepts a query expression, which Django turns into SQL when it saves the instance:
+
+```py
+def _(book: Book):
+    book.pages = models.F("pages") + 1  # ok
+    book.title = models.Value("Dune")  # ok
+```
+
+`update()` and `aupdate()` set the fields in the database, so their keywords accept the same values
+as an assignment, including expressions:
+
+```py
+def _():
+    Book.objects.update(title=models.F("title"), pages=models.F("pages") + 1)  # ok
+    Book.objects.filter(pages=0).update(title=models.Value("Untitled"))  # ok
+    Book.objects.update(title=None)  # error: [invalid-argument-type]
+
+async def _():
+    await Book.objects.aupdate(pages=models.F("pages") + 1)  # ok
+```
+
+The constructor and `create()` store the value on the instance as an assignment does, and Django
+resolves an expression when it inserts the row. An expression that refers to a column, such as
+`F("pages")`, raises a `ValueError` at that point, because the row does not exist yet, but we do not
+distinguish such expressions from the others:
+
+```py
+def _():
+    Book(title=models.Value("Dune"), pages=models.Value(412))  # ok
+    Book.objects.create(title=models.Value("Dune"), pages=412)  # ok
+    Book(pages=None)  # error: [invalid-argument-type]
+```
+
+A foreign key is different. The constructor and `create()` assign it through Django's relation
+descriptor, which raises a `ValueError` for a value that is neither a model instance nor `None`.
+`update()` writes the column directly, so it accepts an expression:
+
+```py
+class Author(models.Model):
+    name = models.CharField(max_length=100)
+
+class Novel(models.Model):
+    author = models.ForeignKey(Author, on_delete=models.CASCADE)
+
+def _(author: Author):
+    Novel(author=author)  # ok
+    Novel(author=models.F("author"))  # error: [invalid-argument-type]
+    Novel.objects.create(author=models.Value(1))  # error: [invalid-argument-type]
+    Novel.objects.update(author=models.F("author"))  # ok
+```
+
+The `<field>_id` keyword of a foreign key accepts any value:
+
+```py
+def _():
+    Novel(author_id=models.F("author_id"))  # ok
+    Novel.objects.update(author_id=models.F("author_id"))  # ok
+```
+
 ## Fields that convert their values
 
 A field class gives its values their Python type in `from_db_value()` and `to_python()`. When a

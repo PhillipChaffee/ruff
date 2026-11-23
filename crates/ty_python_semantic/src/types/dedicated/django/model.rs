@@ -7,6 +7,7 @@ use ty_module_resolver::KnownModule;
 use ty_python_core::place_table;
 
 use crate::place::known_module_symbol;
+use crate::types::attribute_write::{DescriptorSetterDomain, descriptor_setter_domain};
 use crate::types::class::{ClassLiteral, DynamicClassAnchor, DynamicClassLiteral};
 use crate::types::member::class_member;
 use crate::types::{
@@ -17,6 +18,7 @@ use crate::types::{
 use crate::{Db, ProgramEnvironment};
 
 use super::fields::{Field, model_field_type, model_metadata, own_model_fields};
+use super::managers::ModelKeywords;
 use super::project::project_models;
 use super::relations::{is_foreign_key, refined_field_type, related_model};
 use super::{inherits_from, is_django_file, is_model};
@@ -72,7 +74,13 @@ pub(super) fn init_method<'db>(
         Parameter::positional_or_keyword(Name::new_static("self")).with_annotated_type(self_ty),
         Parameter::variadic(Name::new_static("args")).with_annotated_type(any),
     ];
-    parameters.extend(field_keyword_parameters(db, env, class, specialization)?);
+    parameters.extend(field_keyword_parameters(
+        db,
+        env,
+        class,
+        specialization,
+        ModelKeywords::Constructor,
+    )?);
     Some(Type::function_like_callable(
         db,
         Signature::new(Parameters::standard(parameters), Type::none(db, env)),
@@ -83,10 +91,12 @@ pub(super) fn init_method<'db>(
 /// `QuerySet.update()` accept for a model: its fields, `<foreign key>_id`, `pk`, `id` when no
 /// field is the primary key, the links to its concrete parents and its properties.
 ///
-/// A field's parameter has the type that an assignment to the field accepts. Every parameter is
-/// optional because fields can be assigned after construction, and `update()` sets only the fields
-/// that it names. The forward side of a many-to-many relation is left out: Django prohibits
-/// assigning to it, and `update()` cannot set it.
+/// A field's parameter has the type that an assignment to the field accepts, except that the
+/// constructor (`keywords_kind` is [`ModelKeywords::Constructor`]) does not accept a query
+/// expression for a foreign key. Every parameter is optional because fields can be assigned after
+/// construction, and `update()` sets only the fields that it names. The forward side of a
+/// many-to-many relation is left out: Django prohibits assigning to it, and `update()` cannot set
+/// it.
 ///
 /// The parameters do not depend on an `__init__` that the model or a base class defines, because
 /// `update()` does not call the constructor:
@@ -105,8 +115,14 @@ pub(super) fn field_keyword_parameters<'db>(
     env: &ProgramEnvironment<'db>,
     class: StaticClassLiteral<'db>,
     specialization: Option<Specialization<'db>>,
+    keywords_kind: ModelKeywords,
 ) -> Option<Vec<Parameter<'db>>> {
     let any = Type::any();
+    let model_instance = Type::instance(
+        db,
+        env,
+        class.apply_optional_specialization(db, specialization),
+    );
     let mut keywords: Vec<(Name, Type<'db>)> = vec![(Name::new_static("pk"), any)];
     let mut has_primary_key = false;
 
@@ -149,18 +165,38 @@ pub(super) fn field_keyword_parameters<'db>(
             {
                 continue;
             }
-            let set_ty = field_class
-                .iter_mro(db)
-                .filter_map(ClassBase::into_class)
-                .filter_map(|field_base| field_base.static_class_literal(db))
-                .find(|(field_base, _)| field_base.is_known(db, KnownClass::DjangoField))
-                .and_then(|(_, specialization)| specialization?.types(db).first().copied())
-                .unwrap_or(any);
-            keywords.push((field.name.clone(), set_ty));
-            if field_class
+            // The first type argument of `Field`, which the stubs use for the values that the
+            // field accepts, other than query expressions.
+            let stub_set_ty = || {
+                field_class
+                    .iter_mro(db)
+                    .filter_map(ClassBase::into_class)
+                    .filter_map(|field_base| field_base.static_class_literal(db))
+                    .find(|(field_base, _)| field_base.is_known(db, KnownClass::DjangoField))
+                    .and_then(|(_, specialization)| specialization?.types(db).first().copied())
+                    .unwrap_or(any)
+            };
+            let is_relation = field_class
                 .static_class_literal(db)
-                .is_some_and(|(field_class, _)| is_foreign_key(db, field_class))
-            {
+                .is_some_and(|(field_class, _)| is_foreign_key(db, field_class));
+            let set_ty = if is_relation && keywords_kind == ModelKeywords::Constructor {
+                // The constructor assigns a relation through its descriptor, which raises a
+                // `ValueError` for a value that is neither a model instance nor `None`, so
+                // `Book(author=F("author"))` fails while `update(author=F("author"))` works.
+                stub_set_ty()
+            } else {
+                // The value types of the field's `__set__`, as for an assignment to the field.
+                // For Django's fields, the stubs declare `value: _ST_contra | Combinable`, which
+                // also accepts a query expression such as `F("pages") + 1`.
+                match descriptor_setter_domain(db, env, field_ty, model_instance) {
+                    DescriptorSetterDomain::Known(set_ty) => set_ty,
+                    DescriptorSetterDomain::Missing | DescriptorSetterDomain::Deferred => {
+                        stub_set_ty()
+                    }
+                }
+            };
+            keywords.push((field.name.clone(), set_ty));
+            if is_relation {
                 keywords.push((Name::new(format!("{}_id", field.name)), any));
             }
         }

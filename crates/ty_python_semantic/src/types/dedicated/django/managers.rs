@@ -464,6 +464,7 @@ pub(super) fn model_keywords_method<'db>(
             env,
             model_class,
             model_specialization,
+            ModelKeywords::Fields,
         )?],
     };
 
