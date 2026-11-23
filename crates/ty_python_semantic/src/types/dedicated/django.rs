@@ -22,7 +22,7 @@ mod queryset;
 mod relations;
 
 pub(in crate::types) use fields::is_renamed_field;
-use fields::renamed_field;
+use fields::{model_field_type, renamed_field};
 use lookups::{FieldNamesMethod, query_context, report_field_names, report_update_fields};
 use managers::{
     ModelKeywords, bound_manager, from_queryset_return_type, inherited_manager,
@@ -40,9 +40,9 @@ use queryset::{
     values_return_type,
 };
 pub(in crate::types) use queryset::{constructed_instance_type, type_alias_value_override};
+use relations::get_model_return_type;
 use relations::reverse_accessor;
 pub(in crate::types) use relations::{foreign_key_model_type, is_foreign_key};
-use relations::{get_model_return_type, refined_field_type};
 
 /// Returns whether `class` is the known class `known` or a subclass of it.
 fn inherits_from<'db>(db: &'db dyn Db, class: StaticClassLiteral<'db>, known: KnownClass) -> bool {
@@ -50,6 +50,12 @@ fn inherits_from<'db>(db: &'db dyn Db, class: StaticClassLiteral<'db>, known: Kn
         .iter_mro(db, None)
         .filter_map(ClassBase::into_class)
         .any(|base| base.is_known(db, known))
+}
+
+/// Returns whether `class` is defined by Django itself, in a module of the `django` package.
+fn is_django_class<'db>(db: &'db dyn Db, class: StaticClassLiteral<'db>) -> bool {
+    file_to_module(db, class.body_scope(db).program_file(db).resolver_file(db))
+        .is_some_and(|module| module.name(db).first_component() == "django")
 }
 
 /// Returns whether `class` is a subclass of Django's `Model`.
@@ -141,9 +147,9 @@ pub(in crate::types) fn synthesized_member<'db>(
 }
 
 /// Return a more precise type for the member `name` of the class `class`, specialized with
-/// `specialization`, whose type according to the stubs is `ty`: a relation field whose related
-/// model the stubs could not determine, a manager that is not yet bound to its model, or the
-/// `create()` and `update()` methods of a manager or queryset.
+/// `specialization`, whose type according to the stubs is `ty`: a field that converts its values,
+/// a relation field whose related model the stubs could not determine, a manager that is not yet
+/// bound to its model, or the `create()` and `update()` methods of a manager or queryset.
 pub(in crate::types) fn refined_class_member<'db>(
     db: &'db dyn Db,
     env: &ProgramEnvironment<'db>,
@@ -161,7 +167,7 @@ pub(in crate::types) fn refined_class_member<'db>(
         return None;
     }
     contributed_attribute_type(db, env, ty)
-        .or_else(|| refined_field_type(db, env, class, name, ty))
+        .or_else(|| model_field_type(db, env, class, name, ty))
         .or_else(|| bound_manager(db, env, class, ty))
 }
 

@@ -16,7 +16,8 @@ use crate::types::{
 };
 use crate::{Db, ProgramEnvironment};
 
-use super::is_model;
+use super::relations::{is_foreign_key, refined_field_type};
+use super::{inherits_from, is_django_class, is_model};
 
 /// The type of a Django model field, and metadata extracted from the field construction.
 ///
@@ -352,4 +353,127 @@ pub(in crate::types) fn is_renamed_field<'db>(
         && own_model_fields(db, class)
             .iter()
             .any(|field| field.symbol == name && field.name != name)
+}
+
+/// Return a more precise type for the field `name` of the model `class`, whose type according to
+/// the stubs is `ty`: a field that converts its values (see [`converted_field_type`]), or a
+/// relation field whose related model the stubs could not determine.
+pub(super) fn model_field_type<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+    class: StaticClassLiteral<'db>,
+    name: &str,
+    ty: Type<'db>,
+) -> Option<Type<'db>> {
+    converted_field_type(db, env, ty).or_else(|| refined_field_type(db, env, class, name, ty))
+}
+
+/// Return the type of an instance of the field class `field_class` whose values are assigned as
+/// `write` and read as `read`.
+///
+/// The stubs give each field class two type parameters, for the values that can be assigned to
+/// the field and for the values that it holds. A subclass that does not declare them is
+/// specialized as its nearest generic base class.
+pub(super) fn specialized_field_type<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+    field_class: StaticClassLiteral<'db>,
+    write: Type<'db>,
+    read: Type<'db>,
+) -> Option<Type<'db>> {
+    let generic_class = field_class
+        .iter_mro(db, None)
+        .filter_map(ClassBase::into_class)
+        .filter_map(|base| base.static_class_literal(db))
+        .map(|(base, _)| base)
+        .find(|base| {
+            base.generic_context(db)
+                .is_some_and(|generic_context| generic_context.len(db) == 2)
+        })?;
+    Some(Type::instance(
+        db,
+        env,
+        generic_class.apply_specialization(db, |generic_context| {
+            generic_context.specialize(db, vec![write, read])
+        }),
+    ))
+}
+
+/// Return the type of a field `ty` whose class converts its values, and declares their types only
+/// in its conversion methods.
+///
+/// Django converts a value read from the database with `from_db_value()`, and a value assigned to
+/// the field with `to_python()` when the model is validated. A field class outside Django that
+/// overrides them without type arguments for the field class it extends gets the value types of
+/// that class, which are usually wrong:
+/// ```py
+/// class ListField(models.CharField):
+///     def from_db_value(self, value, expression, connection) -> list[str]:
+///         return value.split(",")
+/// ```
+///
+/// The values of such a field have the declared return type of `from_db_value()`, or else of
+/// `to_python()`, or `Any` if neither method has a return annotation. Any value can be assigned,
+/// because the field converts it when it is saved. A field class that declares its type
+/// arguments, as in `class ListField(models.CharField[list[str], list[str]])`, keeps them.
+pub(super) fn converted_field_type<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+    ty: Type<'db>,
+) -> Option<Type<'db>> {
+    let (field_class, _) = ty.nominal_class(db, env)?.static_class_literal(db)?;
+    // The values of relation fields are typed separately, from their related model.
+    if !inherits_from(db, field_class, KnownClass::DjangoField)
+        || is_foreign_key(db, field_class)
+        || inherits_from(db, field_class, KnownClass::DjangoManyToManyField)
+    {
+        return None;
+    }
+    // The stubs declare the value types of Django's own fields, so only the methods and bases of
+    // the classes outside Django matter.
+    let own_classes: Vec<StaticClassLiteral<'db>> = field_class
+        .iter_mro(db, None)
+        .filter_map(ClassBase::into_class)
+        .filter_map(|base| base.static_class_literal(db))
+        .map(|(base, _)| base)
+        .filter(|base| !is_django_class(db, *base))
+        .collect();
+    let declares_value_types = own_classes.iter().any(|class| {
+        class.explicit_bases(db).iter().any(|base| {
+            matches!(base, Type::GenericAlias(alias)
+                if inherits_from(db, alias.origin(db), KnownClass::DjangoField))
+        })
+    });
+    if declares_value_types {
+        return None;
+    }
+    // The first definition of the method `name` in a class outside Django.
+    let conversion_method = |name: &str| {
+        own_classes.iter().find_map(|class| {
+            class_member(db, class.body_scope(db), name).ignore_possibly_undefined()
+        })
+    };
+    let from_db_value = conversion_method("from_db_value");
+    let to_python = conversion_method("to_python");
+    if from_db_value.is_none() && to_python.is_none() {
+        return None;
+    }
+    // The annotated return type of a conversion method. An unannotated method has no declared
+    // return type, and we do not use its inferred one. An overloaded method, and a method whose
+    // decorator makes it something other than a plain function, have none either.
+    let declared_return_type = |method: Type<'db>| {
+        if let Some(function) = method.as_function_literal()
+            && function.has_explicit_return_annotation(db)
+            && let [signature] = function.signature(db).overloads.as_slice()
+        {
+            Some(signature.return_ty)
+        } else {
+            None
+        }
+    };
+    let read = from_db_value
+        .and_then(declared_return_type)
+        .or_else(|| to_python.and_then(declared_return_type))
+        .unwrap_or_else(Type::any);
+    specialized_field_type(db, env, field_class, Type::any(), read)
 }
