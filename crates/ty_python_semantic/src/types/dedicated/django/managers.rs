@@ -9,13 +9,13 @@ use crate::types::callable::CallableTypeKind;
 use crate::types::member::class_member;
 use crate::types::signatures::CallableSignature;
 use crate::types::{
-    CallableType, ClassBase, IntersectionType, KnownClass, ParameterKind, Parameters, Signature,
-    Specialization, StaticClassLiteral, Type,
+    CallableType, ClassBase, IntersectionType, KnownClass, Parameter, ParameterKind, Parameters,
+    Signature, Specialization, StaticClassLiteral, Type,
 };
 use crate::{Db, ProgramEnvironment};
 
 use super::fields::default_manager_name;
-use super::model::init_method;
+use super::model::field_keyword_parameters;
 use super::{is_django_file, is_model};
 
 /// The keyword parameters that a manager or queryset method of a model takes.
@@ -371,11 +371,10 @@ pub(super) fn related_manager_member<'db>(
 /// ```
 ///
 /// `QuerySet.update(**kwargs)` sets the fields that the keywords name, and raises `FieldDoesNotExist`
-/// for another name. We give it the keyword parameters of the `__init__` that we synthesize from the
-/// fields, which leaves out the forward side of a many-to-many relation, as `update()` does, and
-/// not the parameters of an `__init__` that the model defines. If we cannot synthesize that
-/// `__init__`, for example because a base class defines its own, `update()` keeps its declared
-/// signature.
+/// for another name. We give it a keyword parameter for each field, the same ones as the
+/// `__init__` that we synthesize from the fields, even when the model or a base class defines its
+/// own `__init__`, because `update()` does not call the constructor. If we cannot see all the
+/// fields, for example because a base class is unknown, `update()` keeps its declared signature.
 ///
 /// The other parameters of the declared method, such as `through_defaults` of a many-to-many
 /// manager, and its return type are kept. `class` is the class that declares the method, and
@@ -423,7 +422,15 @@ pub(super) fn model_keywords_method<'db>(
     if !is_model(db, model_class) {
         return None;
     }
-    let init = match keywords {
+    let [declared] = function.signature(db).overloads.as_slice() else {
+        return None;
+    };
+    let declared_parameters = declared.parameters();
+    declared_parameters.keyword_variadic()?;
+
+    // The keyword parameters of each overload of the new method, before we drop those that the
+    // declared method already has.
+    let keyword_parameters: Vec<Vec<Parameter<'db>>> = match keywords {
         ModelKeywords::Constructor => {
             let Type::BoundMethod(init) = model
                 .member(db, env, "__init__")
@@ -432,47 +439,40 @@ pub(super) fn model_keywords_method<'db>(
             else {
                 return None;
             };
+            // `create()` only passes keywords on, so positional parameters of `__init__` become
+            // keyword-only, and positional-only and variadic positional parameters are dropped.
             init.bound_signatures(db)?
+                .iter()
+                .map(|init| {
+                    init.parameters()
+                        .iter()
+                        .filter_map(|parameter| match parameter.kind() {
+                            ParameterKind::PositionalOrKeyword { .. } => {
+                                Some(parameter.positional_or_keyword_to_keyword_only())
+                            }
+                            ParameterKind::KeywordOnly { .. }
+                            | ParameterKind::KeywordVariadic { .. } => Some(parameter.clone()),
+                            ParameterKind::PositionalOnly { .. }
+                            | ParameterKind::Variadic { .. } => None,
+                        })
+                        .collect()
+                })
+                .collect()
         }
-        ModelKeywords::Fields => {
-            let Type::Callable(init) = init_method(db, env, model_class, model_specialization)?
-            else {
-                return None;
-            };
-            init.signatures(db)
-        }
+        ModelKeywords::Fields => vec![field_keyword_parameters(
+            db,
+            env,
+            model_class,
+            model_specialization,
+        )?],
     };
-    let [declared] = function.signature(db).overloads.as_slice() else {
-        return None;
-    };
-    let declared_parameters = declared.parameters();
-    declared_parameters.keyword_variadic()?;
 
-    // `create()` only passes keywords on, so positional parameters of `__init__` become
-    // keyword-only, and positional-only and variadic positional parameters are dropped.
-    let overloads = init.iter().map(|init| {
-        let keywords = init
-            .parameters()
-            .iter()
-            .filter(|parameter| {
-                parameter
-                    .keyword_name()
-                    .is_none_or(|name| declared_parameters.keyword_by_name(name).is_none())
-            })
-            .filter_map(|parameter| match parameter.kind() {
-                // The synthesized `__init__` is not bound, and its only positional parameter
-                // that is not variadic is `self`.
-                ParameterKind::PositionalOrKeyword { .. } if keywords == ModelKeywords::Fields => {
-                    None
-                }
-                ParameterKind::PositionalOrKeyword { .. } => {
-                    Some(parameter.positional_or_keyword_to_keyword_only())
-                }
-                ParameterKind::KeywordOnly { .. } | ParameterKind::KeywordVariadic { .. } => {
-                    Some(parameter.clone())
-                }
-                ParameterKind::PositionalOnly { .. } | ParameterKind::Variadic { .. } => None,
-            });
+    let overloads = keyword_parameters.into_iter().map(|keywords| {
+        let keywords = keywords.into_iter().filter(|parameter| {
+            parameter
+                .keyword_name()
+                .is_none_or(|name| declared_parameters.keyword_by_name(name).is_none())
+        });
         let parameters = declared_parameters
             .iter()
             .filter(|parameter| !parameter.is_keyword_variadic())
