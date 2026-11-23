@@ -3,7 +3,7 @@
 
 use ruff_python_ast::name::Name;
 use rustc_hash::FxHashSet;
-use ty_module_resolver::KnownModule;
+use ty_module_resolver::{KnownModule, file_to_module};
 use ty_python_core::place_table;
 
 use crate::place::known_module_symbol;
@@ -616,4 +616,41 @@ pub(super) fn date_navigation_method<'db>(
         self_ty,
     );
     Some(Type::function_like_callable(db, signature))
+}
+
+/// Return `Any` for a class attribute whose value `ty` is an object from outside Django that has
+/// a `contribute_to_class()` method.
+///
+/// When Django creates a model class, `ModelBase.add_to_class()` calls `contribute_to_class(cls,
+/// name)` on each attribute that has that method, and the method decides what the attribute
+/// becomes. django-simple-history, for example, installs a manager this way:
+/// ```py
+/// class Book(models.Model):
+///     history = HistoricalRecords()
+/// ```
+/// Here `Book.history` is a manager, not a `HistoricalRecords`. We cannot know what the method
+/// installs without running it, so the attribute is `Any`.
+///
+/// Django's own fields and managers also have the method, and are handled elsewhere, so this only
+/// applies when no class in the MRO of `ty` comes from a module of Django. A project class that
+/// derives from a Django class keeps its type, even when it overrides the method.
+pub(super) fn contributed_attribute_type<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+    ty: Type<'db>,
+) -> Option<Type<'db>> {
+    let class = ty.nominal_class(db, env)?;
+    // Most attributes have no `contribute_to_class`, so check for it before walking the MRO.
+    ty.member(db, env, "contribute_to_class")
+        .place
+        .ignore_possibly_undefined()?;
+    let comes_from_django = class
+        .iter_mro(db)
+        .filter_map(ClassBase::into_class)
+        .filter_map(|base| base.static_class_literal(db))
+        .any(|(base, _)| {
+            file_to_module(db, base.body_scope(db).program_file(db).resolver_file(db))
+                .is_some_and(|module| module.name(db).first_component() == "django")
+        });
+    (!comes_from_django).then(Type::any)
 }
