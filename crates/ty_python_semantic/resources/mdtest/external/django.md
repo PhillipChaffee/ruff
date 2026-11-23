@@ -3691,6 +3691,118 @@ from django.contrib.auth import get_user_model
 reveal_type(get_user_model())  # revealed: type[AbstractUser]
 ```
 
+### User model set in a star-imported module
+
+The settings module can take `AUTH_USER_MODEL` from a module that it star-imports.
+
+#### Set under a condition
+
+When the star-imported module does not always set `AUTH_USER_MODEL`, the settings module does not
+always set it either, and we keep `AbstractUser`:
+
+`manage.py`:
+
+```py
+import os
+
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "mysite.settings")
+```
+
+`mysite/__init__.py`:
+
+```py
+```
+
+`mysite/base.py`:
+
+```py
+import os
+
+INSTALLED_APPS = ["django.contrib.auth", "django.contrib.contenttypes", "accounts"]
+if os.environ.get("CUSTOM_USER") is not None:
+    AUTH_USER_MODEL = "accounts.Member"
+```
+
+`mysite/settings.py`:
+
+```py
+from .base import *
+```
+
+`accounts/__init__.py`:
+
+```py
+```
+
+`accounts/models.py`:
+
+```py
+from django.contrib.auth.models import AbstractUser
+
+class Member(AbstractUser):
+    pass
+```
+
+`views.py`:
+
+```py
+from django.contrib.auth import get_user_model
+
+reveal_type(get_user_model())  # revealed: type[AbstractUser]
+```
+
+#### Always set
+
+When the star-imported module always sets `AUTH_USER_MODEL`, we use the model that it names:
+
+`manage.py`:
+
+```py
+import os
+
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "mysite.settings")
+```
+
+`mysite/__init__.py`:
+
+```py
+```
+
+`mysite/base.py`:
+
+```py
+INSTALLED_APPS = ["django.contrib.auth", "django.contrib.contenttypes", "accounts"]
+AUTH_USER_MODEL = "accounts.Member"
+```
+
+`mysite/settings.py`:
+
+```py
+from .base import *
+```
+
+`accounts/__init__.py`:
+
+```py
+```
+
+`accounts/models.py`:
+
+```py
+from django.contrib.auth.models import AbstractUser
+
+class Member(AbstractUser):
+    pass
+```
+
+`views.py`:
+
+```py
+from django.contrib.auth import get_user_model
+
+reveal_type(get_user_model())  # revealed: type[Member]
+```
+
 ### User model in settings that we cannot fully see
 
 When the settings module can define settings at runtime, we cannot know the user model, and keep

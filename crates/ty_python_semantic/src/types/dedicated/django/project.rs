@@ -15,7 +15,10 @@ use ty_module_resolver::{
 use ty_python_core::definition::DefinitionKind;
 use ty_python_core::{Program, ProgramFile, global_scope, place_table, use_def_map};
 
-use crate::place::{DefinedPlace, Definedness, Place, global_symbol, known_module_symbol};
+use crate::place::{
+    ConsideredDefinitions, DefinedPlace, Definedness, Place, global_symbol, known_module_symbol,
+    symbol,
+};
 use crate::types::{
     ClassBase, KnownClass, Parameter, Parameters, Signature, StaticClassLiteral, Type, UnionType,
     binding_type,
@@ -659,19 +662,12 @@ pub(super) fn installed_app_models_modules<'db>(
 /// ```
 ///
 /// We take every string that any binding contributes, even one that a later binding replaces or
-/// that runs only under a condition. An extra app can only add relations to the models, so this
-/// can hide a missing-attribute error but not cause one.
+/// that runs only under a condition, as in `if DEBUG: INSTALLED_APPS = [...]` with no other
+/// binding. An extra app can only add relations to the models, so this can hide a
+/// missing-attribute error but not cause one. Without any binding, we do not know the apps.
 fn installed_apps<'db>(db: &'db dyn Db, program: Program<'db>) -> Option<Vec<String>> {
     let project_settings = project_settings(db, program)?;
-    if !project_settings.is_complete
-        || !matches!(
-            global_symbol(db, project_settings.file, "INSTALLED_APPS").place,
-            Place::Defined(DefinedPlace {
-                definedness: Definedness::AlwaysDefined,
-                ..
-            })
-        )
-    {
+    if !project_settings.is_complete {
         return None;
     }
     assigned_strings(db, project_settings.file, "INSTALLED_APPS", &mut Vec::new())
@@ -683,7 +679,7 @@ const MAX_SETTINGS_NAME_DEPTH: usize = 8;
 
 /// Return the strings that the bindings of `name` in the global scope of `file` contribute: the
 /// list or tuple that an assignment assigns or that `+=` adds. A star import is followed to the
-/// module that it imports from.
+/// module that it imports from. We return `None` if `name` has no reachable binding.
 ///
 /// `expanding` holds the names whose bindings we are collecting. A binding can refer to the same
 /// name, as in `INSTALLED_APPS = INSTALLED_APPS + ["library"]`. We collect every binding of that
@@ -721,10 +717,13 @@ fn binding_strings<'db>(
     let scope = global_scope(db, file);
     let symbol = place_table(db, scope).symbol_id(name)?;
     let mut strings = Vec::new();
+    let mut has_binding = false;
     for binding in use_def_map(db, scope).reachable_symbol_bindings(symbol) {
+        // The unbound state at the start of the scope, and a `del`, have no definition.
         let Some(definition) = binding.binding.definition() else {
             continue;
         };
+        has_binding = true;
         let module = parsed_module(db, definition.python_file(db)).load(db);
         let binding_strings = match definition.kind(db) {
             DefinitionKind::Assignment(assignment) if assignment.target(&module).is_name_expr() => {
@@ -752,7 +751,7 @@ fn binding_strings<'db>(
         };
         strings.extend(binding_strings);
     }
-    Some(strings)
+    has_binding.then_some(strings)
 }
 
 /// Return the strings of `expr` in the global scope of `file`: a list or tuple of string
@@ -808,12 +807,31 @@ pub(super) fn user_model<'db>(db: &'db dyn Db, env: &ProgramEnvironment<'db>) ->
 /// Without such an assignment, the value is Django's default, `"auth.User"`. We only use the
 /// settings module if we can see every setting that it defines (see [`project_settings`]), because
 /// it could otherwise set `AUTH_USER_MODEL` in a way that we do not see.
+///
+/// We read the value that the setting has at the end of the settings module. If it is assigned only
+/// under a condition, or assigned different strings in different branches, we do not know the
+/// user model:
+/// ```py
+/// if DEBUG:
+///     AUTH_USER_MODEL = "accounts.Member"
+/// ```
+///
+/// A binding through a star import, as in `from .base import *`, is only always defined if the
+/// imported module always defines the setting, so the same holds for a settings package.
 fn user_model_setting<'db>(db: &'db dyn Db, program: Program<'db>) -> Option<&'db str> {
     let project_settings = project_settings(db, program)?;
     if !project_settings.is_complete {
         return None;
     }
-    match global_symbol(db, project_settings.file, "AUTH_USER_MODEL").place {
+    let scope = global_scope(db, project_settings.file);
+    match symbol(
+        db,
+        scope,
+        "AUTH_USER_MODEL",
+        ConsideredDefinitions::EndOfScope,
+    )
+    .place
+    {
         Place::Undefined => Some("auth.User"),
         Place::Defined(DefinedPlace {
             ty,
