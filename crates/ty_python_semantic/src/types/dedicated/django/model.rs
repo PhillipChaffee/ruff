@@ -35,9 +35,8 @@ use super::{inherits_from, is_django_file, is_model};
 ///
 /// For this model, we construct
 /// `def __init__(self, *args: Any, title: str | int | Combinable = ..., author: ... = ...,
-/// author_id: Any = ..., id: Any = ..., pk: Any = ...) -> None`. A field's parameter has the type
-/// that an assignment to the field accepts. Every keyword is optional because fields can be
-/// assigned after construction, and positional arguments are not checked.
+/// author_id: Any = ..., id: Any = ..., pk: Any = ...) -> None`, with the keyword parameters from
+/// [`field_keyword_parameters`]. Positional arguments are not checked.
 ///
 /// Returns `None`, which keeps the declared `__init__`, if we cannot see everything that the model
 /// inherits or if a base class between the model and `Model` defines its own `__init__`.
@@ -47,10 +46,69 @@ pub(super) fn init_method<'db>(
     class: StaticClassLiteral<'db>,
     specialization: Option<Specialization<'db>>,
 ) -> Option<Type<'db>> {
+    let inherits_custom_init = class
+        .iter_mro(db, specialization)
+        .filter_map(ClassBase::into_class)
+        .filter_map(|base| base.static_class_literal(db))
+        .map(|(base, _)| base)
+        .take_while(|base| !base.is_known(db, KnownClass::DjangoModel))
+        .any(|base| {
+            base != class
+                && class_member(db, base.body_scope(db), "__init__")
+                    .ignore_possibly_undefined()
+                    .is_some()
+        });
+    if inherits_custom_init {
+        return None;
+    }
+
+    let any = Type::any();
+    let self_ty = Type::instance(
+        db,
+        env,
+        class.apply_optional_specialization(db, specialization),
+    );
+    let mut parameters = vec![
+        Parameter::positional_or_keyword(Name::new_static("self")).with_annotated_type(self_ty),
+        Parameter::variadic(Name::new_static("args")).with_annotated_type(any),
+    ];
+    parameters.extend(field_keyword_parameters(db, env, class, specialization)?);
+    Some(Type::function_like_callable(
+        db,
+        Signature::new(Parameters::standard(parameters), Type::none(db, env)),
+    ))
+}
+
+/// The keyword-only parameters for the names that Django's `Model.__init__` and
+/// `QuerySet.update()` accept for a model: its fields, `<foreign key>_id`, `pk`, `id` when no
+/// field is the primary key, the links to its concrete parents and its properties.
+///
+/// A field's parameter has the type that an assignment to the field accepts. Every parameter is
+/// optional because fields can be assigned after construction, and `update()` sets only the fields
+/// that it names. The forward side of a many-to-many relation is left out: Django prohibits
+/// assigning to it, and `update()` cannot set it.
+///
+/// The parameters do not depend on an `__init__` that the model or a base class defines, because
+/// `update()` does not call the constructor:
+/// ```py
+/// class Custom(models.Model):
+///     title = models.CharField(max_length=200)
+///
+///     def __init__(self, *args: Any, source: str = "", **kwargs: Any) -> None: ...
+///
+/// Custom.objects.update(source="import")  # FieldDoesNotExist
+/// ```
+///
+/// Returns `None` if we cannot see everything that the model inherits.
+pub(super) fn field_keyword_parameters<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+    class: StaticClassLiteral<'db>,
+    specialization: Option<Specialization<'db>>,
+) -> Option<Vec<Parameter<'db>>> {
     let any = Type::any();
     let mut keywords: Vec<(Name, Type<'db>)> = vec![(Name::new_static("pk"), any)];
     let mut has_primary_key = false;
-    let mut reached_model = false;
 
     for base in class.iter_mro(db, specialization) {
         let base = match base {
@@ -60,17 +118,6 @@ pub(super) fn init_method<'db>(
             _ => continue,
         };
         let (base, base_specialization) = base.static_class_literal(db)?;
-        if base.is_known(db, KnownClass::DjangoModel) {
-            reached_model = true;
-        } else if !reached_model
-            && base != class
-            && class_member(db, base.body_scope(db), "__init__")
-                .ignore_possibly_undefined()
-                .is_some()
-        {
-            return None;
-        }
-
         // Django also accepts a keyword that names a property, and assigns the value to it. The
         // properties of `object`, such as `__class__`, are not included: Django's
         // `_meta._property_names` for a model is just `['pk']`.
@@ -129,18 +176,9 @@ pub(super) fn init_method<'db>(
         keywords.push((Name::new_static("id"), any));
     }
 
-    let self_ty = Type::instance(
-        db,
-        env,
-        class.apply_optional_specialization(db, specialization),
-    );
-    let mut parameters = vec![
-        Parameter::positional_or_keyword(Name::new_static("self")).with_annotated_type(self_ty),
-        Parameter::variadic(Name::new_static("args")).with_annotated_type(any),
-    ];
     // The first class in the method resolution order that defines a name determines its type.
     let mut seen = FxHashSet::default();
-    parameters.extend(
+    Some(
         keywords
             .into_iter()
             .filter(|(name, _)| seen.insert(name.clone()))
@@ -148,12 +186,9 @@ pub(super) fn init_method<'db>(
                 Parameter::keyword_only(name)
                     .with_annotated_type(ty)
                     .with_default_type(ty)
-            }),
-    );
-    Some(Type::function_like_callable(
-        db,
-        Signature::new(Parameters::standard(parameters), Type::none(db, env)),
-    ))
+            })
+            .collect(),
+    )
 }
 
 /// The names of the properties defined in the body of `class`.
