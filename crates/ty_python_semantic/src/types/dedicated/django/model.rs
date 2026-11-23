@@ -440,6 +440,9 @@ pub(super) fn foreign_key_id_member<'db>(
 ///
 /// In a model method, `instance` is the type variable of an unannotated `self`, which we resolve
 /// to its upper bound, the model.
+///
+/// The name rule (`<name>_id` reads the field `<name>`) must agree with
+/// [`ty_python_core::place::id_attribute_companion_place`], which picks the place to narrow.
 pub(in crate::types) fn is_nullable_foreign_key_id<'db>(
     db: &'db dyn Db,
     env: &ProgramEnvironment<'db>,

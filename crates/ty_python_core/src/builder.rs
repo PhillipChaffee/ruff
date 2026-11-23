@@ -1134,13 +1134,17 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
             return;
         }
 
-        let place_table = self.current_place_table();
-        let narrowed_places =
-            PossiblyNarrowedPlacesBuilder::new(self.db, place_table).expression(value);
+        let (mut narrowed_places, companions) =
+            PossiblyNarrowedPlacesBuilder::new(self.db, self.current_place_table())
+                .expression(value);
+        for companion in companions {
+            narrowed_places.insert(self.add_place(companion));
+        }
 
         // Don't register if the target itself is one of the narrowed places (e.g. `x = x is None`),
         // since the alias would be invalidated immediately by this same assignment.
-        let target_is_narrowed = place_table
+        let target_is_narrowed = self
+            .current_place_table()
             .symbol_id(target_name)
             .is_some_and(|symbol| narrowed_places.contains(&symbol.into()));
 
@@ -1298,7 +1302,12 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
     }
 
     /// Add narrowed places from aliased expressions to the possibly-narrowed set.
-    fn add_alias_narrowed_places(&self, expr: &ast::Expr, places: &mut PossiblyNarrowedPlaces) {
+    fn add_alias_narrowed_places(
+        &self,
+        expr: &ast::Expr,
+        places: &mut PossiblyNarrowedPlaces,
+        companions: &mut SmallVec<[PlaceExpr; 1]>,
+    ) {
         Self::walk_narrowing_alias_predicate(expr, &mut |leaf| {
             let key = ExpressionNodeKey::from(leaf);
             if let Some(alias_predicate) = self.alias_predicates.get(&key) {
@@ -1306,10 +1315,11 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
                     .expression
                     .node_ref(self.db)
                     .node(self.module);
-                let aliased_places =
+                let (aliased_places, aliased_companions) =
                     PossiblyNarrowedPlacesBuilder::new(self.db, self.current_place_table())
                         .expression(aliased_node);
                 places.extend(aliased_places);
+                companions.extend(aliased_companions);
             }
         });
     }
@@ -2358,11 +2368,7 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
     ///
     /// This uses the closure-based approach to avoid calling Salsa queries that depend on
     /// the semantic index (which is still being built).
-    ///
-    /// A check on `book.shelf_id` can narrow `book.shelf` (see
-    /// [`crate::place::foreign_key_place_of_id_attribute`]), so this adds the place `book.shelf`
-    /// if the scope has not used it yet. A use of `book.shelf` after the check then sees the
-    /// narrowing. Every path that records a narrowing constraint goes through this function.
+    /// It adds companion places such as `book.shelf` for a check on `book.shelf_id` to the table.
     fn compute_possibly_narrowed_places(
         &mut self,
         predicate: &PredicateOrLiteral<'db>,
@@ -2375,12 +2381,16 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
                 match pred.node {
                     PredicateNode::Expression(expression) => {
                         let expression_node = expression.node_ref(self.db).node(self.module);
-                        let (mut places, foreign_keys) =
+                        let (mut places, mut companions) =
                             PossiblyNarrowedPlacesBuilder::new(self.db, place_table)
-                                .expression_and_foreign_keys(expression_node);
-                        self.add_alias_narrowed_places(expression_node, &mut places);
-                        for foreign_key in foreign_keys {
-                            places.insert(self.add_place(foreign_key));
+                                .expression(expression_node);
+                        self.add_alias_narrowed_places(
+                            expression_node,
+                            &mut places,
+                            &mut companions,
+                        );
+                        for companion in companions {
+                            places.insert(self.add_place(companion));
                         }
                         places
                     }

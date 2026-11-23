@@ -33,9 +33,7 @@ use ty_python_core::ast_ids::HasScopedUseId;
 use ty_python_core::definition::{Definition, DefinitionKind};
 use ty_python_core::expression::Expression;
 use ty_python_core::frozen::FrozenMap;
-use ty_python_core::place::{
-    PlaceExpr, PlaceTable, ScopedPlaceId, foreign_key_place_of_id_attribute,
-};
+use ty_python_core::place::{PlaceExpr, PlaceTable, ScopedPlaceId, id_attribute_companion_place};
 use ty_python_core::predicate::{
     ClassPatternPredicateKind, MappingPatternPredicateKind, PatternPredicate, PatternPredicateKind,
     Predicate, PredicateNode, SequencePatternPredicateKind, SubjectElementPatternPredicate,
@@ -5598,9 +5596,8 @@ impl<'db> NarrowingConstraintsBuilder<'db, '_> {
         is_set: bool,
     ) -> Option<(ScopedPlaceId, NarrowingConstraint<'db>)> {
         let db = self.db;
-        // The semantic index registers the same place for a predicate on `book.shelf_id`. This
-        // returns `None` without looking at types for an attribute that cannot be an ID.
-        let foreign_key = foreign_key_place_of_id_attribute(attribute)?;
+        // This first checks the name, so it returns early, without looking at types, for an
+        // attribute that cannot be an ID.
         if !django::is_nullable_foreign_key_id(
             db,
             &self.env,
@@ -5609,6 +5606,8 @@ impl<'db> NarrowingConstraintsBuilder<'db, '_> {
         ) {
             return None;
         }
+        // The semantic index registers the same place for a predicate on `book.shelf_id`.
+        let foreign_key = id_attribute_companion_place(attribute)?;
         let place = self.places().place_id(&foreign_key)?;
         let none = Type::none(db, &self.env);
         let ty = if is_set {

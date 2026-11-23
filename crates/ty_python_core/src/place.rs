@@ -10,7 +10,6 @@ use ruff_db::parsed::ParsedModuleRef;
 use ruff_index::IndexVec;
 use ruff_python_ast as ast;
 use smallvec::SmallVec;
-use std::cell::RefCell;
 use std::hash::{Hash, Hasher};
 use std::iter::FusedIterator;
 
@@ -37,35 +36,18 @@ pub(crate) fn match_subject_place_expressions(subject: &ast::Expr) -> SmallVec<[
 
 /// Return the place `X.<name>` for the attribute `X.<name>_id`.
 ///
-/// This exists for the ID attributes of Django foreign keys. A model with a foreign key `shelf`
-/// also has an attribute `shelf_id`, and code often checks the ID instead of the related object,
-/// because that needs no database query:
-///
-/// ```python
-/// if book.shelf_id is not None:
-///     print(book.shelf.label)
-/// ```
-///
-/// The semantic index cannot know types, so it registers `book.shelf` as a place that a truthiness
-/// check or an `is`/`is not` comparison of `book.shelf_id` might narrow, and adds that place to the
-/// place table if the scope has not used it yet. Type inference then decides whether a constraint
-/// applies: it narrows `book.shelf` only if `book` is a Django model instance and `shelf` is a
-/// nullable foreign key. For other code, no constraint applies. The cost is one extra place for
-/// each such attribute in a predicate.
-pub fn foreign_key_place_of_id_attribute(attribute: &ast::ExprAttribute) -> Option<PlaceExpr> {
+/// A check on an ID can narrow its companion attribute. For example, a Django model with a
+/// nullable foreign key `shelf` returns a related object, never `None`, while `shelf_id` is set:
+/// `if book.shelf_id is not None: book.shelf.label`. The semantic index cannot know types, so it
+/// registers `book.shelf` as possibly narrowed by a truthiness check or an `is`/`is not`
+/// comparison of `book.shelf_id`, and type inference decides whether a constraint applies.
+pub fn id_attribute_companion_place(attribute: &ast::ExprAttribute) -> Option<PlaceExpr> {
     let name = attribute
         .attr
         .strip_suffix("_id")
         .filter(|name| !name.is_empty())?;
-    // Check that `X` is a place before cloning it.
-    PlaceExpr::try_from_expr(&attribute.value)?;
-    PlaceExpr::try_from_expr(&ast::ExprAttribute {
-        node_index: ast::AtomicNodeIndex::NONE,
-        range: attribute.range,
-        value: attribute.value.clone(),
-        attr: ast::Identifier::new(name, attribute.attr.range),
-        ctx: ast::ExprContext::Load,
-    })
+    let value = MemberExprBuilder::visit_expr((&*attribute.value).into())?;
+    PlaceExpr::try_from_member_expr(MemberExprBuilder::visit_attribute_name(&value, name))
 }
 
 /// An expression that can be the target of a `Definition`.
@@ -586,9 +568,9 @@ impl From<ScopedSymbolId> for ScopedPlaceId {
 pub(crate) struct PossiblyNarrowedPlacesBuilder<'db, 'a> {
     db: &'db dyn Db,
     places: &'a PlaceTableBuilder,
-    /// The foreign key places `X.<name>` for the attributes `X.<name>_id` that the expression
-    /// checks; see [`foreign_key_place_of_id_attribute`]. They may not be in the place table yet.
-    foreign_keys: RefCell<Vec<PlaceExpr>>,
+    /// The places `X.<name>` for the attributes `X.<name>_id` that the expression checks; see
+    /// [`id_attribute_companion_place`]. They may not be in the place table yet.
+    companion_places: SmallVec<[PlaceExpr; 1]>,
 }
 
 impl<'db, 'a> PossiblyNarrowedPlacesBuilder<'db, 'a> {
@@ -596,23 +578,18 @@ impl<'db, 'a> PossiblyNarrowedPlacesBuilder<'db, 'a> {
         Self {
             db,
             places,
-            foreign_keys: RefCell::default(),
+            companion_places: SmallVec::new(),
         }
     }
 
-    /// Compute possibly narrowed places for an expression predicate.
-    pub(crate) fn expression(self, expr: &ast::Expr) -> PossiblyNarrowedPlaces {
-        self.expression_node(expr)
-    }
-
-    /// Compute possibly narrowed places for an expression predicate, and the foreign key places
-    /// that it can also narrow. The caller adds the foreign key places to the place table.
-    pub(crate) fn expression_and_foreign_keys(
-        self,
+    /// Compute possibly narrowed places for an expression predicate, and the companion places
+    /// (see [`id_attribute_companion_place`]) that the caller must add to the place table.
+    pub(crate) fn expression(
+        mut self,
         expr: &ast::Expr,
-    ) -> (PossiblyNarrowedPlaces, Vec<PlaceExpr>) {
+    ) -> (PossiblyNarrowedPlaces, SmallVec<[PlaceExpr; 1]>) {
         let places = self.expression_node(expr);
-        (places, self.foreign_keys.into_inner())
+        (places, self.companion_places)
     }
 
     /// Compute possibly narrowed places for a pattern predicate.
@@ -624,7 +601,7 @@ impl<'db, 'a> PossiblyNarrowedPlacesBuilder<'db, 'a> {
         self.pattern_kind(pattern.subject(self.db), module)
     }
 
-    fn expression_node(&self, expr: &ast::Expr) -> PossiblyNarrowedPlaces {
+    fn expression_node(&mut self, expr: &ast::Expr) -> PossiblyNarrowedPlaces {
         match expr {
             // Simple expressions that directly narrow a place.
             ast::Expr::Name(_) => self.simple_expr(expr),
@@ -632,7 +609,8 @@ impl<'db, 'a> PossiblyNarrowedPlacesBuilder<'db, 'a> {
             ast::Expr::Attribute(attribute) => {
                 let mut places = self.simple_expr(expr);
                 places.extend(self.simple_expr(&attribute.value));
-                self.add_foreign_key_of_id(attribute);
+                self.companion_places
+                    .extend(id_attribute_companion_place(attribute));
                 places
             }
             // Subscript truthiness can also narrow its base (`TypedDict` and tuple unions).
@@ -676,7 +654,7 @@ impl<'db, 'a> PossiblyNarrowedPlacesBuilder<'db, 'a> {
 
     /// Compare expressions can narrow places on either side of the comparison,
     /// and can also narrow subscript bases (for `TypedDict` and tuple narrowing).
-    fn expr_compare(&self, expr_compare: &ast::ExprCompare) -> PossiblyNarrowedPlaces {
+    fn expr_compare(&mut self, expr_compare: &ast::ExprCompare) -> PossiblyNarrowedPlaces {
         let mut places = PossiblyNarrowedPlaces::default();
 
         for operand in &expr_compare.operands {
@@ -708,7 +686,8 @@ impl<'db, 'a> PossiblyNarrowedPlacesBuilder<'db, 'a> {
             if matches!(&*expr_compare.ops, [ast::CmpOp::Is | ast::CmpOp::IsNot])
                 && let ast::Expr::Attribute(attribute) = expr
             {
-                self.add_foreign_key_of_id(attribute);
+                self.companion_places
+                    .extend(id_attribute_companion_place(attribute));
             }
         }
 
@@ -717,7 +696,7 @@ impl<'db, 'a> PossiblyNarrowedPlacesBuilder<'db, 'a> {
 
     /// Call expressions can narrow their first argument (isinstance, issubclass, hasattr, len)
     /// or narrow based on TypeGuard/TypeIs return types.
-    fn expr_call(&self, expr_call: &ast::ExprCall) -> PossiblyNarrowedPlaces {
+    fn expr_call(&mut self, expr_call: &ast::ExprCall) -> PossiblyNarrowedPlaces {
         let mut places = PossiblyNarrowedPlaces::default();
 
         // Under the current narrowing semantics, we only ever use the first two positional
@@ -759,7 +738,7 @@ impl<'db, 'a> PossiblyNarrowedPlacesBuilder<'db, 'a> {
     }
 
     /// Boolean operations combine places from all sub-expressions.
-    fn expr_bool_op(&self, bool_op: &ast::ExprBoolOp) -> PossiblyNarrowedPlaces {
+    fn expr_bool_op(&mut self, bool_op: &ast::ExprBoolOp) -> PossiblyNarrowedPlaces {
         let mut places = PossiblyNarrowedPlaces::default();
         for value in &bool_op.values {
             places.extend(self.expression_node(value));
@@ -767,19 +746,11 @@ impl<'db, 'a> PossiblyNarrowedPlacesBuilder<'db, 'a> {
         places
     }
 
-    fn expr_if(&self, expr_if: &ast::ExprIf) -> PossiblyNarrowedPlaces {
+    fn expr_if(&mut self, expr_if: &ast::ExprIf) -> PossiblyNarrowedPlaces {
         let mut places = self.expression_node(&expr_if.test);
         places.extend(self.expression_node(&expr_if.body));
         places.extend(self.expression_node(&expr_if.orelse));
         places
-    }
-
-    /// A truthiness check or an `is`/`is not` comparison of `book.shelf_id` can narrow
-    /// `book.shelf`; see [`foreign_key_place_of_id_attribute`].
-    fn add_foreign_key_of_id(&self, attribute: &ast::ExprAttribute) {
-        if let Some(place_expr) = foreign_key_place_of_id_attribute(attribute) {
-            self.foreign_keys.borrow_mut().push(place_expr);
-        }
     }
 
     /// Helper to add a potential narrowing target expression to the set.
