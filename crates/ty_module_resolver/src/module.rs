@@ -303,6 +303,8 @@ pub enum KnownModule {
     DjangoDbModelsQuery,
     #[strum(serialize = "django.forms.forms")]
     DjangoFormsForms,
+    #[strum(serialize = "rest_framework.serializers")]
+    RestFrameworkSerializers,
     #[strum(serialize = "django.utils.choices")]
     DjangoUtilsChoices,
     #[strum(serialize = "django_stubs_ext.annotations")]
@@ -381,6 +383,7 @@ impl KnownModule {
             Self::DjangoDbModelsManager => "django.db.models.manager",
             Self::DjangoDbModelsQuery => "django.db.models.query",
             Self::DjangoFormsForms => "django.forms.forms",
+            Self::RestFrameworkSerializers => "rest_framework.serializers",
             Self::DjangoUtilsChoices => "django.utils.choices",
             Self::DjangoStubsExtAnnotations => "django_stubs_ext.annotations",
             Self::PydanticConfig => "pydantic.config",
@@ -430,6 +433,7 @@ impl KnownModule {
             | Self::DjangoDbModelsManager
             | Self::DjangoDbModelsQuery
             | Self::DjangoFormsForms
+            | Self::RestFrameworkSerializers
             | Self::DjangoUtilsChoices
             | Self::DjangoStubsExtAnnotations
             | Self::PydanticConfig

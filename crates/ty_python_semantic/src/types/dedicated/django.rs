@@ -72,8 +72,8 @@ pub(in crate::types) fn is_model<'db>(db: &'db dyn Db, class: StaticClassLiteral
 
 /// Returns whether Django reads the options of `class` from a nested `Meta` class.
 ///
-/// Models and forms are configured this way, and a subclass routinely replaces the `Meta` class
-/// of its base with an unrelated one:
+/// Models, forms and Django REST framework serializers are configured this way, and a subclass
+/// routinely replaces the `Meta` class of its base with an unrelated one:
 ///
 /// ```python
 /// class BookForm(forms.ModelForm):
@@ -90,7 +90,9 @@ pub(in crate::types) fn has_meta_options<'db>(
     db: &'db dyn Db,
     class: StaticClassLiteral<'db>,
 ) -> bool {
-    is_model(db, class) || inherits_from(db, class, KnownClass::DjangoBaseForm)
+    is_model(db, class)
+        || inherits_from(db, class, KnownClass::DjangoBaseForm)
+        || inherits_from(db, class, KnownClass::DrfBaseSerializer)
 }
 
 /// Provides synthesized attributes and methods for Django models.
