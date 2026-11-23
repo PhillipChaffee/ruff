@@ -13,9 +13,11 @@ use crate::types::{
 };
 use crate::{Db, ProgramEnvironment};
 
-use super::fields::{Field, model_metadata, own_model_fields, specialized_field_type};
+use super::fields::{
+    Field, ModelReference, model_metadata, own_model_fields, specialized_field_type,
+};
 use super::model::concrete_model;
-use super::project::{models_modules, project_models};
+use super::project::{imported_model, models_modules, relation_source_models, user_model};
 use super::{inherits_from, is_model};
 
 /// Returns whether `class` is Django's `ForeignKey` or one of its subclasses.
@@ -83,8 +85,9 @@ pub(super) struct IncomingRelations<'db> {
 /// A `ManyToManyField` adds a `ManyRelatedManager` for the source model, with the same
 /// intermediate model as the field itself.
 ///
-/// We find the relation fields of the models in the module that defines the related model, and in
-/// the project's `models` modules (see [`models_modules`]).
+/// We find the relation fields of the models in the module that defines the related model, in the
+/// project's `models` modules (see [`models_modules`]), and in the source of the installed apps
+/// outside the project (see [`relation_source_models`]).
 pub(super) fn reverse_accessor<'db>(
     db: &'db dyn Db,
     class: StaticClassLiteral<'db>,
@@ -123,29 +126,35 @@ pub(super) fn incoming_relations<'db>(
     let target = Type::instance(db, &env, class.default_specialization(db));
     let concrete_target = concrete_model(db, class.default_specialization(db));
 
-    let sources = project_models(db, file)
+    let sources = relation_source_models(db, file)
         // Abstract models have no table, so nothing can refer to their rows.
         .filter(|source| !model_metadata(db, *source).is_abstract);
 
     let mut relations = Vec::new();
     let mut is_complete = true;
     for source in sources {
+        // We read the fields of a model of an installed app from its source, but code that uses the
+        // model gets the class that imports resolve to, which can be a class from the stubs.
+        // A model whose stubs lack its class has no type that code using it could see, so we
+        // leave its relations out.
+        let Some(imported_source) = imported_model(db, source) else {
+            continue;
+        };
         let source_name = source.name(db).to_lowercase();
-        let source_ty = Type::instance(db, &env, source.default_specialization(db));
+        let source_ty = Type::instance(db, &env, imported_source.default_specialization(db));
 
         // A model that inherits from a concrete model is reachable from its parent.
-        if source != class
+        if imported_source != class
             && !model_metadata(db, source).is_proxy
             && source
                 .explicit_bases(db)
                 .iter()
                 .filter_map(|base| concrete_model(db, base.to_class_type(db)?))
-                .any(|parent| {
-                    parent.static_class_literal(db).map(|(parent, _)| parent) == Some(class)
-                })
+                .filter_map(|parent| parent.static_class_literal(db))
+                .any(|(parent, _)| imported_model(db, parent) == Some(class))
         {
             relations.push(IncomingRelation {
-                source,
+                source: imported_source,
                 accessor: Some(ReverseAccessor {
                     name: Name::new(&source_name),
                     ty: source_ty,
@@ -178,13 +187,14 @@ pub(super) fn incoming_relations<'db>(
                 if !(is_foreign_key(db, field_class) || is_many_to_many) {
                     continue;
                 }
-                let Some(related) = related_model(db, &env, declaring, source, field) else {
+                let Some(related) = related_model(db, &env, declaring, source, field)
+                    .and_then(|related| imported_model_instance(db, &env, related))
+                else {
                     // An unresolved reference such as `"library.Book"` might name `class`.
                     if field
                         .to
-                        .and_then(Type::as_string_literal)
+                        .and_then(|reference| reference.as_str(db))
                         .is_some_and(|reference| {
-                            let reference = reference.value(db);
                             let model_name = reference
                                 .rsplit_once('.')
                                 .map_or(reference, |(_, name)| name);
@@ -231,10 +241,7 @@ pub(super) fn incoming_relations<'db>(
                 // default, and a symmetrical relation has no reverse accessor: `person.friends`
                 // already holds the people on both sides of the relation.
                 let is_symmetrical = is_many_to_many
-                    && field
-                        .to
-                        .and_then(Type::as_string_literal)
-                        .is_some_and(|reference| reference.value(db) == "self")
+                    && field.to.and_then(|reference| reference.as_str(db)) == Some("self")
                     && metadata.symmetrical != Some(false);
                 let accessor_name = match related_name {
                     _ if is_symmetrical => None,
@@ -248,8 +255,15 @@ pub(super) fn incoming_relations<'db>(
                 } else if is_many_to_many {
                     // Both sides of the relation share the model of the intermediate table.
                     let through = match field.through {
-                        Some(through) => model_reference(db, &env, declaring, source, through),
-                        None => automatic_through_model(db, &env, source, field, related),
+                        Some(through) => model_reference(
+                            db,
+                            &env,
+                            declaring,
+                            source,
+                            ModelReference::Type(through),
+                        )
+                        .and_then(|through| imported_model_instance(db, &env, through)),
+                        None => automatic_through_model(db, &env, imported_source, field, related),
                     };
                     many_related_manager(db, &env, source_ty, through.unwrap_or_else(Type::unknown))
                 } else {
@@ -264,7 +278,7 @@ pub(super) fn incoming_relations<'db>(
                             ty,
                         });
                 relations.push(IncomingRelation {
-                    source,
+                    source: imported_source,
                     accessor,
                     query_name: query_name.map(Name::new),
                     is_one_to_one,
@@ -276,6 +290,27 @@ pub(super) fn incoming_relations<'db>(
         relations: relations.into_boxed_slice(),
         is_complete,
     }
+}
+
+/// Return the instance type of the class that imports of the model of the instance type `model`
+/// resolve to (see [`imported_model`]).
+fn imported_model_instance<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+    model: Type<'db>,
+) -> Option<Type<'db>> {
+    let Some((class, _)) = model
+        .nominal_class(db, env)
+        .and_then(|class| class.static_class_literal(db))
+    else {
+        return Some(model);
+    };
+    let imported = imported_model(db, class)?;
+    Some(if imported == class {
+        model
+    } else {
+        Type::instance(db, env, imported.default_specialization(db))
+    })
 }
 
 /// Return the type of the manager that a `ForeignKey` adds to its related model.
@@ -417,15 +452,18 @@ pub(super) fn related_model<'db>(
 }
 
 /// Return the model that `reference` denotes: a model class, the name of a model in the module of
-/// `declaring`, or `"self"` for `model`.
+/// `declaring`, `"self"` for `model`, or `settings.AUTH_USER_MODEL` for the project's user model.
 fn model_reference<'db>(
     db: &'db dyn Db,
     env: &ProgramEnvironment<'db>,
     declaring: StaticClassLiteral<'db>,
     model: StaticClassLiteral<'db>,
-    reference: Type<'db>,
+    reference: ModelReference<'db>,
 ) -> Option<Type<'db>> {
-    let to = reference;
+    let to = match reference {
+        ModelReference::Type(to) => to,
+        ModelReference::UserModelSetting => return user_model(db, env),
+    };
     let related = match to.as_string_literal() {
         Some(reference) if reference.value(db) == "self" => {
             return Some(Type::instance(db, env, model.default_specialization(db)));
@@ -644,7 +682,7 @@ fn refined_many_to_many_type<'db>(
     let field = own_model_fields(db, class)
         .iter()
         .find(|field| field.name == name)?;
-    let resolve = |current: Type<'db>, reference: Option<Type<'db>>| {
+    let resolve = |current: Type<'db>, reference: Option<ModelReference<'db>>| {
         if current.is_dynamic() {
             reference.and_then(|reference| model_reference(db, env, class, class, reference))
         } else {
@@ -656,7 +694,7 @@ fn refined_many_to_many_type<'db>(
         None if through.is_dynamic() => {
             automatic_through_model(db, env, class, field, refined_to.unwrap_or(to))
         }
-        reference => resolve(through, reference),
+        reference => resolve(through, reference.map(ModelReference::Type)),
     };
     if refined_to.is_none() && refined_through.is_none() {
         return None;
