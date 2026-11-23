@@ -21,7 +21,9 @@ mod project;
 mod queryset;
 mod relations;
 
-pub(in crate::types) use fields::{is_renamed_field, nullable_field_type};
+pub(in crate::types) use fields::{
+    is_nullable_field_instance, is_renamed_field, nullable_field_type,
+};
 use fields::{model_field_type, renamed_field};
 use lookups::{FieldNamesMethod, query_context, report_field_names, report_update_fields};
 use managers::{
