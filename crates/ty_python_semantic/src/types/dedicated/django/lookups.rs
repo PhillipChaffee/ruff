@@ -12,7 +12,7 @@ use crate::{Db, ProgramEnvironment};
 use super::fields::{model_metadata, own_model_fields};
 use super::project::is_project_search_path;
 use super::relations::{incoming_relations, is_foreign_key, related_model};
-use super::{inherits_from, is_model};
+use super::{inherits_from, is_django_file, is_model};
 
 /// The separator between the names of a path, as in `author__name`.
 pub(super) const LOOKUP_SEP: &str = "__";
@@ -349,10 +349,6 @@ pub(super) fn query_context<'db>(
     if matches!(receiver, Type::TypeVar(_)) {
         return None;
     }
-    let is_django_class = |class: StaticClassLiteral<'db>| {
-        file_to_module(db, class.program_file(db).resolver_file(db))
-            .is_some_and(|module| module.name(db).first_component() == "django")
-    };
     // The classes up to `QuerySet` or `BaseManager` must all be Django's own.
     let django_base = |ty: Type<'db>| {
         for base in ty
@@ -361,7 +357,7 @@ pub(super) fn query_context<'db>(
             .filter_map(ClassBase::into_class)
         {
             let (base, specialization) = base.static_class_literal(db)?;
-            if !is_django_class(base) {
+            if !is_django_file(db, base.program_file(db)) {
                 return None;
             }
             if base.is_known(db, KnownClass::DjangoQuerySet)

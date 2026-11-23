@@ -4,10 +4,10 @@
 
 use ruff_python_ast as ast;
 use ty_module_resolver::file_to_module;
+use ty_python_core::ProgramFile;
 
 use crate::types::call::{Binding, Bindings, CallArguments};
 use crate::types::context::InferContext;
-use crate::types::function::FunctionType;
 use crate::types::{
     BoundMethodType, ClassBase, KnownClass, Specialization, StaticClassLiteral, Type,
 };
@@ -52,9 +52,10 @@ fn inherits_from<'db>(db: &'db dyn Db, class: StaticClassLiteral<'db>, known: Kn
         .any(|base| base.is_known(db, known))
 }
 
-/// Returns whether `class` is defined by Django itself, in a module of the `django` package.
-fn is_django_class<'db>(db: &'db dyn Db, class: StaticClassLiteral<'db>) -> bool {
-    file_to_module(db, class.body_scope(db).program_file(db).resolver_file(db))
+/// Returns whether `file` is a module of the `django` package, so that what it defines is
+/// Django's own rather than a project's subclass or override.
+fn is_django_file<'db>(db: &'db dyn Db, file: ProgramFile<'db>) -> bool {
+    file_to_module(db, file.resolver_file(db))
         .is_some_and(|module| module.name(db).first_component() == "django")
 }
 
@@ -234,13 +235,6 @@ fn is_queryset_or_manager<'db>(
     })
 }
 
-/// Returns whether Django declares `function`, rather than a class of the project that overrides
-/// a method of Django.
-fn is_django_function<'db>(db: &'db dyn Db, function: FunctionType<'db>) -> bool {
-    file_to_module(db, function.program_file(db).resolver_file(db))
-        .is_some_and(|module| module.name(db).first_component() == "django")
-}
-
 /// Report the arguments of a call to a Django method that Django rejects at runtime, although the
 /// stubs accept their types: the arguments of `values_list()`, and the field names that
 /// `order_by()`, `only()`, `defer()`, `select_related()`, `values()`, `values_list()` and
@@ -266,7 +260,8 @@ pub(in crate::types) fn report_queryset_call<'db>(
         let name = function.name(db).as_str();
         let field_names_method = FieldNamesMethod::from_name(name);
         if !(field_names_method.is_some() || matches!(name, "values_list" | "save" | "asave"))
-            || !is_django_function(db, function)
+            // A method of the project that overrides one of Django's can accept other arguments.
+            || !is_django_file(db, function.program_file(db))
         {
             continue;
         }

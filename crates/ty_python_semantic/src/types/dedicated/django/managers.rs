@@ -15,8 +15,8 @@ use crate::types::{
 use crate::{Db, ProgramEnvironment};
 
 use super::fields::default_manager_name;
-use super::is_model;
 use super::model::init_method;
+use super::{is_django_file, is_model};
 
 /// The keyword parameters that a manager or queryset method of a model takes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -251,8 +251,8 @@ pub(super) fn inherited_manager<'db>(
 ///             break
 /// ```
 ///
-/// Returns `None` for a model without a manager of its own, whose default manager is the
-/// `objects` manager that Django adds.
+/// Returns `None` when no model in the MRO declares a manager (with the chosen name, if there is
+/// one). Without a declared manager, the default manager is the `objects` manager that Django adds.
 #[salsa::tracked(returns(copy), cycle_initial=|_, _, _| None, heap_size=ruff_memory_usage::heap_size)]
 pub(super) fn default_manager<'db>(
     db: &'db dyn Db,
@@ -394,8 +394,7 @@ pub(super) fn model_keywords_method<'db>(
     let Type::FunctionLiteral(function) = ty else {
         return None;
     };
-    let module = file_to_module(db, class.program_file(db).resolver_file(db))?;
-    if module.name(db).first_component() != "django" {
+    if !is_django_file(db, class.program_file(db)) {
         return None;
     }
     // The type arguments of `BaseManager` or `QuerySet`, whichever `class` inherits from.
