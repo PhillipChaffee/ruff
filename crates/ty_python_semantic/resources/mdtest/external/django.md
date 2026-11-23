@@ -2306,6 +2306,32 @@ def _(book: Book):
     reveal_type(book.review_set.get())  # revealed: Review
 ```
 
+## Reverse accessors in queries before later models
+
+A module-level query can also go through a reverse accessor before the module defines another model.
+The later model still adds its reverse accessor to the earlier one:
+
+```py
+from django.db import models
+
+class Author(models.Model):
+    name = models.CharField(max_length=100)
+
+class Book(models.Model):
+    author = models.ForeignKey(Author, on_delete=models.CASCADE)
+
+Author.objects.get().book_set.all()
+Book.objects.get().review_set.all()
+reveal_type(Book.objects.get().review_set.all())  # revealed: QuerySet[Review, Review]
+
+class Review(models.Model):
+    book = models.ForeignKey(Book, on_delete=models.CASCADE)
+
+def _(author: Author, book: Book):
+    reveal_type(author.book_set.get())  # revealed: Book
+    reveal_type(book.review_set.get())  # revealed: Review
+```
+
 ## Managers declared on the model
 
 A manager declared in the class body belongs to the model, like the default manager. Django binds it
