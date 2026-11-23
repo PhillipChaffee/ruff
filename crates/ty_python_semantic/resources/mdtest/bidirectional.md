@@ -1198,6 +1198,26 @@ class EmptyBox(Generic[T]):
         pass
 ```
 
+## Covariant constructors with an annotated `self`
+
+The declared type is the type context of a constructor call. If it is compatible with the `self`
+annotation of `__init__`, it determines the specialization, even when the `self` annotation is
+wider:
+
+```py
+from typing import Generic
+from typing_extensions import TypeVar
+
+T = TypeVar("T", covariant=True)
+
+class Out(Generic[T]):
+    def __init__(self: "Out[bool | None]") -> None: ...
+
+out: Out[bool] = Out()  # ok
+reveal_type(out)  # revealed: Out[bool]
+reveal_type(Out())  # revealed: Out[bool | None]
+```
+
 ## Dataclass constructors with outer return contexts
 
 A covariant dataclass argument referring to outer `Self` should not specialize to its declared
