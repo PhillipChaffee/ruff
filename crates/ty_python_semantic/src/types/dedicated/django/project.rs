@@ -288,12 +288,11 @@ pub(super) fn project_models<'db>(
     db: &'db dyn Db,
     file: ProgramFile<'db>,
 ) -> impl Iterator<Item = StaticClassLiteral<'db>> + 'db {
-    let own_models = file_models(db, file);
-    own_models.iter().copied().chain(
+    file_models(db, file).chain(
         models_module_models(db, file.program(db))
             .iter()
             .copied()
-            .filter(move |model| !own_models.contains(model)),
+            .filter(move |model| !file_models(db, file).any(|own| own == *model)),
     )
 }
 
@@ -310,12 +309,11 @@ pub(super) fn relation_source_models<'db>(
     db: &'db dyn Db,
     file: ProgramFile<'db>,
 ) -> impl Iterator<Item = StaticClassLiteral<'db>> + 'db {
-    let own_models = file_models(db, file);
     project_models(db, file).chain(
         installed_models(db, file.program(db))
             .iter()
             .filter(move |installed| {
-                !own_models.contains(&installed.model)
+                !file_models(db, file).any(|own| own == installed.model)
                     && installed.imported.is_some_and(|imported| {
                         imported == installed.model
                             || imported.body_scope(db).program_file(db) != file
@@ -335,11 +333,7 @@ fn models_module_models<'db>(
     let env = ProgramEnvironment::from_program(program);
     let models: FxIndexSet<_> = models_modules(db, env.resolver_environment(db))
         .iter()
-        .flat_map(|module| {
-            file_models(db, ProgramFile::new(db, *module, program))
-                .iter()
-                .copied()
-        })
+        .flat_map(|module| file_models(db, ProgramFile::new(db, *module, program)))
         .collect();
     models.into_iter().collect()
 }
@@ -374,20 +368,17 @@ fn installed_models<'db>(db: &'db dyn Db, program: Program<'db>) -> Box<[Install
             .and_then(|module| module.file(db))
             .map(|imported| ProgramFile::new(db, imported, program));
         for model in file_models(db, program_file) {
-            if models.iter().any(|installed| installed.model == *model) {
+            if models.iter().any(|installed| installed.model == model) {
                 continue;
             }
             let imported = match imported_file {
                 Some(imported_file) if imported_file != program_file => {
                     model_named(db, imported_file, model.name(db))
-                        .or_else(|| imported_from_defining_module(db, *model))
+                        .or_else(|| imported_from_defining_module(db, model))
                 }
-                _ => Some(*model),
+                _ => Some(model),
             };
-            models.push(InstalledModel {
-                model: *model,
-                imported,
-            });
+            models.push(InstalledModel { model, imported });
         }
     }
     models.into_boxed_slice()
@@ -456,16 +447,88 @@ fn model_named<'db>(
     is_model(db, class).then_some(class)
 }
 
-/// The models in the global scope of `file`, including models that it imports.
-#[salsa::tracked(returns(deref), cycle_initial=|_, _, _| Box::default(), heap_size=ruff_memory_usage::heap_size)]
-fn file_models<'db>(db: &'db dyn Db, file: ProgramFile<'db>) -> Box<[StaticClassLiteral<'db>]> {
-    let models: FxIndexSet<_> = use_def_map(db, global_scope(db, file))
+/// The models in the global scope of `file`, including models that it imports, in the order of
+/// their bindings.
+fn file_models<'db>(
+    db: &'db dyn Db,
+    file: ProgramFile<'db>,
+) -> impl Iterator<Item = StaticClassLiteral<'db>> + 'db {
+    file_model_bindings(db, file)
+        .iter()
+        .map(|binding| binding.model)
+}
+
+/// A model that the global scope of a file binds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, get_size2::GetSize, salsa::SalsaValue)]
+struct FileModelBinding<'db> {
+    /// The position of the binding among the end-of-scope bindings of the global scope.
+    position: usize,
+    model: StaticClassLiteral<'db>,
+}
+
+/// The models of [`file_models`], each with the position of its first binding.
+#[salsa::tracked(
+    returns(deref),
+    cycle_initial=|_, _, _| Box::default(),
+    cycle_fn=file_model_bindings_cycle_fn,
+    heap_size=ruff_memory_usage::heap_size
+)]
+fn file_model_bindings<'db>(
+    db: &'db dyn Db,
+    file: ProgramFile<'db>,
+) -> Box<[FileModelBinding<'db>]> {
+    let bindings = use_def_map(db, global_scope(db, file))
         .all_end_of_scope_symbol_bindings()
         .flat_map(|(_, bindings)| bindings.filter_map(|binding| binding.binding.definition()))
-        .filter_map(|definition| binding_type(db, definition).as_class_literal()?.as_static())
-        .filter(|class| is_model(db, *class))
-        .collect();
-    models.into_iter().collect()
+        .enumerate()
+        .filter_map(|(position, definition)| {
+            let model = binding_type(db, definition)
+                .as_class_literal()?
+                .as_static()?;
+            is_model(db, model).then_some(FileModelBinding { position, model })
+        });
+    first_binding_of_each_model(bindings)
+}
+
+/// Keep the models of earlier iterations of a cycle.
+///
+/// A module-level call can depend on the models of its own module, through a reverse accessor:
+/// ```py
+/// Book.objects.get().review_set.all()
+///
+/// class Review(models.Model):
+///     book = models.ForeignKey(Book, on_delete=models.CASCADE)
+/// ```
+/// Whether `class Review` is reachable depends on whether the call returns, so the type of
+/// `class Review` is part of the cycle. While the cycle iterates, its type can be a provisional
+/// value that is not a model, and `Review` would be left out and added back on alternate iterations.
+/// Once the cycle has had a few iterations to settle, a model stays in the list, so the iteration
+/// reaches a fixed point. The models stay in the order of their bindings, whichever iteration found
+/// them.
+fn file_model_bindings_cycle_fn<'db>(
+    _db: &'db dyn Db,
+    cycle: &salsa::Cycle,
+    previous: &[FileModelBinding<'db>],
+    current: Box<[FileModelBinding<'db>]>,
+    _file: ProgramFile<'db>,
+) -> Box<[FileModelBinding<'db>]> {
+    if cycle.iteration() <= crate::TAINTED_CYCLES {
+        return current;
+    }
+    let mut bindings: Vec<_> = previous.iter().chain(current.iter()).copied().collect();
+    bindings.sort_by_key(|binding| binding.position);
+    first_binding_of_each_model(bindings)
+}
+
+/// Keep the first of the bindings, ordered by position, of each model.
+fn first_binding_of_each_model<'db>(
+    bindings: impl IntoIterator<Item = FileModelBinding<'db>>,
+) -> Box<[FileModelBinding<'db>]> {
+    let mut models = FxIndexSet::default();
+    bindings
+        .into_iter()
+        .filter(|binding| models.insert(binding.model))
+        .collect()
 }
 
 /// The files of the project's `models` modules, including the submodules of a `models` package.
