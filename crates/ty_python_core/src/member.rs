@@ -309,6 +309,14 @@ impl MemberExprBuilder {
         Some(MemberExprBuilder { path, segments })
     }
 
+    pub(super) fn visit_attribute_name(value: &MemberExprBuilder, name: &str) -> MemberExprBuilder {
+        let start_offset = value.path.text_len();
+        let path = CharStr::concat(&[value.path.as_str(), name]);
+        let mut segments = value.segments.clone();
+        segments.push(SegmentInfo::new(SegmentKind::Attribute, start_offset));
+        MemberExprBuilder { path, segments }
+    }
+
     fn subscript_part(subscript_slice: &ast::Expr) -> Option<(SegmentKind, MemberPathPart<'_>)> {
         match subscript_slice {
             // Handle integer subscripts, like `x[0]`.
