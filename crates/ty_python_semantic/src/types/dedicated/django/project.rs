@@ -22,6 +22,16 @@ use crate::{Db, FxIndexSet, ProgramEnvironment};
 use super::is_model;
 use super::relations::registered_model;
 
+/// Returns whether modules found on `search_path` are project code.
+///
+/// Besides the project root, this includes the extra search paths: a project can keep its apps in
+/// a directory that is not the root, such as `src/`, and put that directory on `PYTHONPATH` or
+/// in the `extra-paths` setting. Django finds its apps through `INSTALLED_APPS` wherever they
+/// live, so we treat that code like the rest of the project.
+pub(super) fn is_project_search_path(search_path: &SearchPath) -> bool {
+    search_path.is_first_party() || search_path.is_extra()
+}
+
 /// Return the type of the setting `name` on `django.conf.settings`, an instance of `LazySettings`.
 ///
 /// The stubs give every setting the type `Any`, through a `__getattr__` method. We look the setting
@@ -106,25 +116,23 @@ struct ProjectSettings<'db> {
 /// os.environ.setdefault("DJANGO_SETTINGS_MODULE", "mysite.settings")
 /// ```
 ///
-/// We only use a first-party `manage` module. A project that sets `DJANGO_SETTINGS_MODULE`
-/// elsewhere, or that runs with a different settings module than its `manage.py` names, can get
-/// the wrong settings, which can report settings that the real settings module defines.
+/// We only use a `manage` module in the project (see [`is_project_search_path`]). A project that
+/// sets `DJANGO_SETTINGS_MODULE` elsewhere, or that runs with a different settings module than its
+/// `manage.py` names, can get the wrong settings, which can report settings that the real settings
+/// module defines.
 #[salsa::tracked(returns(copy), heap_size=ruff_memory_usage::heap_size)]
 fn project_settings<'db>(db: &'db dyn Db, program: Program<'db>) -> Option<ProjectSettings<'db>> {
     let env = ProgramEnvironment::from_program(program);
     let resolver_environment = env.resolver_environment(db);
-    let first_party_file = |name: &ModuleName| {
+    let project_file = |name: &ModuleName| {
         let module = resolve_module_confident(db, resolver_environment, name)?;
-        if !module
-            .search_path(db)
-            .is_some_and(SearchPath::is_first_party)
-        {
+        if !module.search_path(db).is_some_and(is_project_search_path) {
             return None;
         }
         module.file(db)
     };
 
-    let manage = first_party_file(&ModuleName::new_static("manage")?)?;
+    let manage = project_file(&ModuleName::new_static("manage")?)?;
     let mut finder = SettingsModuleFinder::default();
     let program_file = |file| ProgramFile::new(db, file, program);
     finder.visit_body(
@@ -132,7 +140,7 @@ fn project_settings<'db>(db: &'db dyn Db, program: Program<'db>) -> Option<Proje
             .load(db)
             .suite(),
     );
-    let file = first_party_file(&ModuleName::new(&finder.settings_module?)?)?;
+    let file = project_file(&ModuleName::new(&finder.settings_module?)?)?;
 
     // Follow the star imports of the settings module, which commonly splits its settings over
     // several modules with `from .base import *`.
@@ -320,7 +328,7 @@ fn file_models<'db>(db: &'db dyn Db, file: ProgramFile<'db>) -> Box<[StaticClass
 ///
 /// Django imports the `models` module of each installed app when it starts, and a model only
 /// takes part in relations once its module is imported. We do not read the project's settings to
-/// find the installed apps, so we treat every first-party module with a `models` component in its
+/// find the installed apps, so we treat every project module with a `models` component in its
 /// name as the models of an app: `library.models` and `library.models.book`, for example.
 #[salsa::tracked(returns(deref), heap_size=ruff_memory_usage::heap_size)]
 pub(super) fn models_modules<'db>(
@@ -331,11 +339,7 @@ pub(super) fn models_modules<'db>(
     let mut pending: Vec<Module<'db>> = list_modules(db, resolver_environment)
         .iter()
         .copied()
-        .filter(|module| {
-            module
-                .search_path(db)
-                .is_some_and(SearchPath::is_first_party)
-        })
+        .filter(|module| module.search_path(db).is_some_and(is_project_search_path))
         .collect();
     while let Some(module) = pending.pop() {
         if module
@@ -348,7 +352,10 @@ pub(super) fn models_modules<'db>(
         }
         pending.extend(module.all_submodules(db));
     }
+    // A directory that is both under the project root and an extra search path is scanned through
+    // both, which reaches the same file as two modules (`app.models` and `src.app.models`).
     files.sort_unstable();
+    files.dedup();
     files.into_boxed_slice()
 }
 
