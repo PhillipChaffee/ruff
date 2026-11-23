@@ -207,6 +207,13 @@ Custom.objects.update(title="Dune")  # ok
 Custom.objects.update(source="import")  # error: [unknown-argument]
 ```
 
+The same holds for a model that inherits `__init__`:
+
+```py
+CustomChild.objects.update(title="Dune")  # ok
+CustomChild.objects.update(source="import")  # error: [unknown-argument]
+```
+
 The model's properties are keywords, but not the attributes that every object has:
 
 ```py
@@ -227,6 +234,131 @@ class Book(models.Model):
 def _(book: Book):
     reveal_type(book.title)  # revealed: str | None
     reveal_type(book.pages)  # revealed: int | None
+```
+
+## Annotated fields
+
+The arguments of a field determine its value types, also when the field has an annotation.
+`null=True` adds `None` to them, so a nullable field does not match an annotation without `None`:
+
+```py
+from django.db import models
+
+class Settings(models.Model):
+    # error: [invalid-assignment] "Object of type `BooleanField[bool | None, bool | None]` is not assignable to `BooleanField[bool, bool]`"
+    enabled: models.BooleanField = models.BooleanField(null=True)
+    # error: [invalid-assignment] "Object of type `CharField[str | int | None, str | None]` is not assignable to `CharField[str | int, str]`"
+    code: models.CharField = models.CharField(max_length=5, null=True)
+    # error: [invalid-assignment] "Object of type `BooleanField[bool | None, bool | None]` is not assignable to `BooleanField[bool, bool] | None`"
+    visible: models.BooleanField | None = models.BooleanField(null=True)
+```
+
+The annotation still determines the type of the attribute:
+
+```py
+def _(settings: Settings):
+    reveal_type(settings.enabled)  # revealed: bool
+```
+
+An annotation that includes `None`, an annotation of a non-nullable field, and a field without an
+annotation are fine:
+
+```py
+from typing import Any
+
+class Preferences(models.Model):
+    enabled: models.BooleanField[bool | None, bool | None] = models.BooleanField(null=True)  # ok
+    code: "models.CharField[str | int | None, str | None]" = models.CharField(max_length=5, null=True)  # ok
+    archived: models.BooleanField = models.BooleanField(null=False)  # ok
+    hidden: models.BooleanField = models.BooleanField()  # ok
+    pinned = models.BooleanField(null=True)  # ok
+    loose: models.Field = models.BooleanField(null=True)  # ok
+    anything: Any = models.BooleanField(null=True)  # ok
+
+def _(preferences: Preferences):
+    reveal_type(preferences.enabled)  # revealed: bool | None
+    reveal_type(preferences.pinned)  # revealed: bool | None
+```
+
+`null` must be a literal for the stubs to choose a nullable type. Otherwise the annotation is used:
+
+```py
+def make_flag(nullable: bool) -> None:
+    flag: models.BooleanField = models.BooleanField(null=nullable)  # error: [deprecated]
+```
+
+`null=True` also decides over explicit type arguments in the call that leave out `None`, because a
+`NULL` column reads as `None` whatever the call says:
+
+```py
+class Profile(models.Model):
+    # error: [invalid-assignment]
+    confirmed: models.BooleanField = models.BooleanField[bool, bool](null=True)
+```
+
+A field subclass that declares its type arguments, and a field that converts its values, keep their
+types:
+
+```py
+class StrictBooleanField(models.BooleanField[bool, bool]): ...
+
+class ListField(models.CharField):
+    def from_db_value(self, value: Any, expression: Any, connection: Any) -> list[str]:
+        return value.split(",")
+
+class Catalog(models.Model):
+    strict: StrictBooleanField = StrictBooleanField(null=True)  # ok
+    tags: ListField = ListField(max_length=100, null=True)  # ok
+```
+
+A nullable foreign key holds `None` as well:
+
+```py
+class Author(models.Model):
+    pass
+
+class Book(models.Model):
+    editor: "models.ForeignKey[Author | None, Author | None]" = models.ForeignKey(
+        Author, null=True, on_delete=models.SET_NULL
+    )  # ok
+    # error: [invalid-assignment] "Object of type `ForeignKey[Author | None, Author | None]` is not assignable to `ForeignKey[Author, Author]`"
+    author: "models.ForeignKey[Author, Author]" = models.ForeignKey(Author, null=True, on_delete=models.SET_NULL)
+```
+
+A `FileField` reads as a `FieldFile` even for a `NULL` column, so `null=True` does not change its
+types:
+
+```py
+class Upload(models.Model):
+    document: models.FileField = models.FileField(null=True)  # ok
+```
+
+An inherited annotation is the type context of an unannotated field in a subclass:
+
+```py
+class Publication(models.Model):
+    is_public: models.BooleanField = models.BooleanField(default=False)
+
+    class Meta:
+        abstract = True
+
+class Pamphlet(Publication):
+    # error: [invalid-assignment] "Object of type `BooleanField[bool | None, bool | None]` is not assignable to `BooleanField[bool, bool]`"
+    is_public = models.BooleanField(null=True)
+```
+
+The same applies to a field outside a model:
+
+```py
+class Defaults:
+    # error: [invalid-assignment] "Object of type `BooleanField[bool | None, bool | None]` is not assignable to `BooleanField[bool, bool]`"
+    enabled: models.BooleanField = models.BooleanField(null=True)
+
+def _():
+    # error: [invalid-assignment] "Object of type `BooleanField[bool | None, bool | None]` is not assignable to `BooleanField[bool, bool]`"
+    flag: models.BooleanField = models.BooleanField(null=True)
+    other = models.BooleanField(null=True)
+    reveal_type(other)  # revealed: BooleanField[bool | None, bool | None]
 ```
 
 ## Field names
@@ -1808,6 +1940,23 @@ def _():
     author.chapter_list  # error: [missing-attribute]
 ```
 
+A forward foreign key leads to a single object, which Django stores as it is, or `None` if there is
+none:
+
+```py
+class Review(models.Model):
+    book = models.ForeignKey(Book, on_delete=models.CASCADE)
+    editor = models.ForeignKey(Author, null=True, on_delete=models.SET_NULL, related_name="+")
+
+def _():
+    review = Review.objects.prefetch_related(
+        Prefetch("book", to_attr="reviewed_book"),
+        Prefetch("editor", to_attr="review_editor"),
+    ).get()
+    reveal_type(review.reviewed_book)  # revealed: Book
+    reveal_type(review.review_editor)  # revealed: Author | None
+```
+
 ## Field assignments
 
 django-stubs declares the types that a field accepts on assignment. They are wider than the field's
@@ -2133,6 +2282,30 @@ name as an invalid call to that method:
 Book.nonexistent  # error: [invalid-attribute-access]
 ```
 
+## Models defined after queries
+
+Module-level code can query models before the module defines its other models. The later models
+still take part in the relations of the earlier ones:
+
+```py
+from django.db import models
+
+class Author(models.Model):
+    name = models.CharField(max_length=100)
+
+class Book(models.Model):
+    author = models.ForeignKey(Author, on_delete=models.CASCADE)
+
+Book.objects.all()
+Author.objects.all()
+
+class Review(models.Model):
+    book = models.ForeignKey(Book, on_delete=models.CASCADE)
+
+def _(book: Book):
+    reveal_type(book.review_set.get())  # revealed: Review
+```
+
 ## Managers declared on the model
 
 A manager declared in the class body belongs to the model, like the default manager. Django binds it
@@ -2291,6 +2464,14 @@ Book.objects.order_by("-titel")  # error: [invalid-argument-type]
 Book.objects.order_by("author__nme")  # error: [invalid-argument-type] "Cannot resolve keyword 'nme' into field"
 ```
 
+Django no longer accepts a column name qualified with its table:
+
+```py
+Book.objects.order_by(
+    "library_book.title"
+)  # error: [invalid-argument-type] "Cannot resolve keyword 'library_book.title' into field"
+```
+
 `only()` and `defer()` take the names of fields:
 
 ```py
@@ -2343,6 +2524,13 @@ def _(expressions: dict[str, Any]):
     Book.objects.values("titel", **expressions)  # ok
 ```
 
+The keyword arguments of `values_list()` are options, not expressions, so they add no names:
+
+```py
+Book.objects.values_list("flat", flat=True)  # error: [invalid-argument-type] "Cannot resolve keyword 'flat' into field"
+Book.objects.values_list("named", named=True)  # error: [invalid-argument-type] "Cannot resolve keyword 'named' into field"
+```
+
 The `update_fields` of `save()` name fields of the model:
 
 ```py
@@ -2352,6 +2540,14 @@ def _(book: Book):
 
 async def _(book: Book):
     await book.asave(update_fields=["titel"])  # error: [invalid-argument-type]
+```
+
+Django does not update a primary key, under any of its names:
+
+```py
+def _(book: Book):
+    book.save(update_fields=["pk"])  # error: [invalid-argument-type]
+    book.save(update_fields=["id"])  # error: [invalid-argument-type]
 ```
 
 `update()` takes the new field values as keywords, which are checked like the keywords of the
@@ -2782,6 +2978,15 @@ def _(reader: Reader, book: Book):
     reader.favourite = book  # ok
     reader.wish = book  # ok
     Reader(favourite=book, wish=book)  # ok
+```
+
+Django adds the reverse accessor of such a relation to the concrete model, and the proxy model
+inherits it:
+
+```py
+def _(book: Book, proxy: BookProxy):
+    reveal_type(book.wishers.get())  # revealed: Reader
+    reveal_type(proxy.wishers.get())  # revealed: Reader
 ```
 
 A concrete child of a proxy model links to the proxy's concrete parent.
@@ -3410,6 +3615,56 @@ def _(loan: Loan, member: Member):
     reveal_type(member.loans.get())  # revealed: Loan
 ```
 
+### User model set under a condition
+
+When the settings module does not always set `AUTH_USER_MODEL`, we do not know the user model, and
+keep `AbstractUser`:
+
+`manage.py`:
+
+```py
+import os
+
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "mysite.settings")
+```
+
+`mysite/__init__.py`:
+
+```py
+```
+
+`mysite/settings.py`:
+
+```py
+import os
+
+INSTALLED_APPS = ["django.contrib.auth", "django.contrib.contenttypes", "accounts"]
+if os.environ.get("CUSTOM_USER") is not None:
+    AUTH_USER_MODEL = "accounts.Member"
+```
+
+`accounts/__init__.py`:
+
+```py
+```
+
+`accounts/models.py`:
+
+```py
+from django.contrib.auth.models import AbstractUser
+
+class Member(AbstractUser):
+    pass
+```
+
+`views.py`:
+
+```py
+from django.contrib.auth import get_user_model
+
+reveal_type(get_user_model())  # revealed: type[AbstractUser]
+```
+
 ### User model in settings that we cannot fully see
 
 When the settings module can define settings at runtime, we cannot know the user model, and keep
@@ -3869,6 +4124,43 @@ from django.contrib.auth.models import User
 def _(user: User):
     user.auth_token  # error: [missing-attribute]
     user.logentry_set  # error: [missing-attribute]
+```
+
+### `INSTALLED_APPS` set under a condition
+
+A binding of `INSTALLED_APPS` that only runs under a condition counts like any other. An extra app
+can only add relations, so we read the apps of every binding, even when the setting might not be
+set:
+
+`manage.py`:
+
+```py
+import os
+
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "mysite.settings")
+```
+
+`mysite/__init__.py`:
+
+```py
+```
+
+`mysite/settings.py`:
+
+```py
+import os
+
+if os.environ.get("WITH_TOKENS") is not None:
+    INSTALLED_APPS = ["django.contrib.auth", "django.contrib.contenttypes", "rest_framework.authtoken"]
+```
+
+`views.py`:
+
+```py
+from django.contrib.auth.models import User
+
+def _(user: User):
+    reveal_type(user.auth_token)  # revealed: Token
 ```
 
 ## Field names after annotations
