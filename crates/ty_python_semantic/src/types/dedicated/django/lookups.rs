@@ -2,7 +2,7 @@
 //! another model.
 
 use ruff_python_ast::{self as ast, name::Name};
-use ty_module_resolver::{SearchPath, file_to_module};
+use ty_module_resolver::file_to_module;
 
 use crate::types::context::InferContext;
 use crate::types::diagnostic::INVALID_ARGUMENT_TYPE;
@@ -10,6 +10,7 @@ use crate::types::{ClassBase, KnownClass, StaticClassLiteral, Type, UnionType};
 use crate::{Db, ProgramEnvironment};
 
 use super::fields::{model_metadata, own_model_fields};
+use super::project::is_project_search_path;
 use super::relations::{incoming_relations, is_foreign_key, related_model};
 use super::{inherits_from, is_model};
 
@@ -74,10 +75,10 @@ impl<'db> ModelNames<'db> {
 }
 
 /// Returns whether `class` is defined in the project, rather than in an installed package.
-fn is_first_party<'db>(db: &'db dyn Db, class: StaticClassLiteral<'db>) -> bool {
+fn is_project_model<'db>(db: &'db dyn Db, class: StaticClassLiteral<'db>) -> bool {
     file_to_module(db, class.program_file(db).resolver_file(db))
         .and_then(|module| module.search_path(db))
-        .is_some_and(SearchPath::is_first_party)
+        .is_some_and(is_project_search_path)
 }
 
 /// The names that a path can use on the model `model`: its fields, the fields that it inherits,
@@ -117,7 +118,7 @@ fn model_names<'db>(db: &'db dyn Db, model: StaticClassLiteral<'db>) -> ModelNam
         if !is_model(db, base) {
             continue;
         }
-        is_complete &= is_first_party(db, base);
+        is_complete &= is_project_model(db, base);
 
         for field in own_model_fields(db, base) {
             has_primary_key |= field.metadata.primary_key;
