@@ -2494,8 +2494,8 @@ Django no longer accepts a column name qualified with its table:
 
 ```py
 Book.objects.order_by(
-    "library_book.title"
-)  # error: [invalid-argument-type] "Cannot resolve keyword 'library_book.title' into field"
+    "library_book.title"  # error: [invalid-argument-type] "Cannot resolve keyword 'library_book.title' into field"
+)
 ```
 
 `only()` and `defer()` take the names of fields:
