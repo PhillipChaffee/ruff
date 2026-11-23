@@ -418,6 +418,76 @@ pub(super) fn foreign_key_id_member<'db>(
     foreign_key_id_type(db, env, class, field, specialization)
 }
 
+/// Return whether `attribute` is the ID attribute of a nullable foreign key on the model that
+/// `instance` is an instance of.
+///
+/// Code often checks the ID of a nullable foreign key instead of the foreign key itself, because
+/// that needs no database query:
+/// ```py
+/// class Book(models.Model):
+///     shelf = models.ForeignKey(Shelf, null=True, on_delete=models.SET_NULL)
+///
+/// def _(book: Book):
+///     if book.shelf_id is not None:
+///         book.shelf  # Shelf, not Shelf | None
+/// ```
+///
+/// While the ID is set, reading `book.shelf` either returns the related object or raises
+/// `Shelf.DoesNotExist`; it never returns `None`. Assigning to `book.shelf_id` clears the cached
+/// related object, so the two attributes cannot disagree. Narrowing uses this function to narrow
+/// `book.shelf` when it narrows `book.shelf_id`. `OneToOneField` is a subclass of `ForeignKey`, so
+/// it is included.
+///
+/// In a model method, `instance` is the type variable of an unannotated `self`, which we resolve
+/// to its upper bound, the model.
+pub(in crate::types) fn is_nullable_foreign_key_id<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+    instance: Type<'db>,
+    attribute: &str,
+) -> bool {
+    let Some(field_name) = attribute.strip_suffix("_id") else {
+        return false;
+    };
+    let instance = match instance {
+        Type::TypeVar(type_var) => match type_var.typevar(db).upper_bound(db, env) {
+            Some(bound) => bound,
+            None => return false,
+        },
+        _ => instance,
+    };
+    let Type::NominalInstance(instance) = instance else {
+        return false;
+    };
+    let Some((class, _)) = instance.class(db, env).static_class_literal(db) else {
+        return false;
+    };
+    if !is_model(db, class) {
+        return false;
+    }
+    // The field that `book.shelf` reads is the first one named `shelf` in the MRO.
+    let Some(field) = class
+        .iter_mro(db, None)
+        .filter_map(ClassBase::into_class)
+        .filter_map(|base| base.static_class_literal(db))
+        .map(|(base, _)| base)
+        .filter(|base| is_model(db, *base))
+        .find_map(|base| {
+            own_model_fields(db, base)
+                .iter()
+                .find(|field| field.name == field_name)
+        })
+    else {
+        return false;
+    };
+    field.metadata.null
+        && field
+            .ty
+            .nominal_class(db, env)
+            .and_then(|field_class| field_class.static_class_literal(db))
+            .is_some_and(|(field_class, _)| is_foreign_key(db, field_class))
+}
+
 /// Return a relation field's stored ID type, used by both `<field>_id` and `pk`.
 fn foreign_key_id_type<'db>(
     db: &'db dyn Db,

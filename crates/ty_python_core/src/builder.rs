@@ -2358,8 +2358,13 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
     ///
     /// This uses the closure-based approach to avoid calling Salsa queries that depend on
     /// the semantic index (which is still being built).
+    ///
+    /// A check on `book.shelf_id` can narrow `book.shelf` (see
+    /// [`crate::place::foreign_key_place_of_id_attribute`]), so this adds the place `book.shelf`
+    /// if the scope has not used it yet. A use of `book.shelf` after the check then sees the
+    /// narrowing. Every path that records a narrowing constraint goes through this function.
     fn compute_possibly_narrowed_places(
-        &self,
+        &mut self,
         predicate: &PredicateOrLiteral<'db>,
     ) -> PossiblyNarrowedPlaces {
         match predicate {
@@ -2370,9 +2375,13 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
                 match pred.node {
                     PredicateNode::Expression(expression) => {
                         let expression_node = expression.node_ref(self.db).node(self.module);
-                        let mut places = PossiblyNarrowedPlacesBuilder::new(self.db, place_table)
-                            .expression(expression_node);
+                        let (mut places, foreign_keys) =
+                            PossiblyNarrowedPlacesBuilder::new(self.db, place_table)
+                                .expression_and_foreign_keys(expression_node);
                         self.add_alias_narrowed_places(expression_node, &mut places);
+                        for foreign_key in foreign_keys {
+                            places.insert(self.add_place(foreign_key));
+                        }
                         places
                     }
                     PredicateNode::Pattern(pattern) => {
