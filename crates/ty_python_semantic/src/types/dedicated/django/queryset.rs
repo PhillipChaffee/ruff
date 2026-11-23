@@ -14,10 +14,13 @@ use crate::types::context::InferContext;
 use crate::types::diagnostic::INVALID_ARGUMENT_TYPE;
 use crate::types::type_alias::TypeAliasType;
 use crate::types::typed_dict::{TypedDictFieldBuilder, TypedDictType};
-use crate::types::{ClassBase, ClassType, IntersectionType, KnownClass, Specialization, Type};
+use crate::types::{
+    ClassBase, ClassType, IntersectionType, KnownClass, Specialization, Type, UnionType,
+};
 use crate::{Db, ProgramEnvironment};
 
 use super::lookups::{LOOKUP_SEP, QueryContext, resolve_path};
+use super::relations::reverse_accessor;
 use super::{inherits_from, is_model};
 
 /// Return the type of the instance that a call to the constructor of a Django aggregate such as
@@ -199,15 +202,21 @@ fn annotated_queryset<'db, 'a>(
 /// Add the attributes that `QuerySet.prefetch_related()` creates for the `Prefetch` objects with a
 /// `to_attr` to the model of the `QuerySet` it returns.
 ///
-/// Django stores the related objects of such a lookup in a list on each instance:
+/// Django stores the related objects of a relation that leads to many objects in a list on each
+/// instance, and the related object of a relation that leads to at most one object as it is, or
+/// `None` if there is none (`prefetch_one_level()` in `django/db/models/query.py`):
 /// ```py
 /// author = Author.objects.prefetch_related(Prefetch("books", to_attr="book_list")).get()
 /// author.book_list  # list[Book]
+///
+/// book = Book.objects.prefetch_related(Prefetch("author", to_attr="writer")).get()
+/// book.writer  # Author
 /// ```
 ///
 /// The related model is the model of the `queryset` of the `Prefetch` object, or else the model
-/// that the lookup names (see [`related_model`]). We do not add an attribute for a lookup that
-/// spans a relation, such as `"books__chapters"`, because Django sets it on the related objects.
+/// that the lookup names (see [`prefetched_relation`]). We do not add an attribute for a lookup
+/// that spans a relation, such as `"books__chapters"`, because Django sets it on the related
+/// objects.
 pub(super) fn prefetch_related_return_type<'db>(
     db: &'db dyn Db,
     env: &ProgramEnvironment<'db>,
@@ -241,45 +250,82 @@ pub(super) fn prefetch_related_return_type<'db>(
                 return None;
             }
             // Without a `queryset`, its type is the default `QuerySet[Model]`.
-            let related = base_specialization(db, env, queryset, KnownClass::DjangoQuerySet)
+            let queryset_model = base_specialization(db, env, queryset, KnownClass::DjangoQuerySet)
                 .and_then(|specialization| specialization.types(db).first().copied())
                 .filter(|related| {
                     !related
                         .nominal_class(db, env)
                         .is_some_and(|class| class.is_known(db, KnownClass::DjangoModel))
-                })
-                .or_else(|| related_model(db, env, model, lookup))
-                .unwrap_or_else(Type::any);
-            Some((
-                to_attr,
-                KnownClass::List.to_specialized_instance(db, env, &[related]),
-            ))
+                });
+            let attribute = match prefetched_relation(db, env, model, lookup) {
+                Some(PrefetchedRelation::Many(related)) => KnownClass::List
+                    .to_specialized_instance(db, env, &[queryset_model.unwrap_or(related)]),
+                // The model of a `queryset` takes precedence over the model of the relation,
+                // because Django accepts a queryset of a proxy or child model of the related
+                // model. A `queryset` can also leave out the related object.
+                Some(PrefetchedRelation::Single(related)) => match queryset_model {
+                    Some(queryset_related) => {
+                        UnionType::from_two_elements(db, env, queryset_related, Type::none(db, env))
+                    }
+                    None => related,
+                },
+                // We do not know whether Django stores a list or a single object, for example for
+                // a `GenericForeignKey`.
+                None => Type::any(),
+            };
+            Some((to_attr, attribute))
         })
         .collect::<Vec<_>>();
     annotated_queryset(db, env, declared, attributes)
 }
 
-/// Return the model of the related objects that the relation `lookup` of `model` gives: the
-/// model of a related manager, such as a reverse accessor or a many-to-many field, or the model
-/// of a foreign key.
-fn related_model<'db>(
+/// What a relation of a model that `prefetch_related()` follows leads to.
+enum PrefetchedRelation<'db> {
+    /// Any number of objects of the model, through a related manager: a reverse accessor of a
+    /// `ForeignKey`, or either side of a `ManyToManyField`.
+    Many(Type<'db>),
+    /// At most one object, with the type that Django stores for it in the attribute: a
+    /// `ForeignKey` or `OneToOneField` of the model, whose value is `None` only if the field
+    /// allows NULL, or the reverse accessor of a `OneToOneField`, which can have no related
+    /// object.
+    Single(Type<'db>),
+}
+
+/// Return what the relation `lookup`, an attribute of the instance type `model`, leads to.
+fn prefetched_relation<'db>(
     db: &'db dyn Db,
     env: &ProgramEnvironment<'db>,
     model: Type<'db>,
     lookup: &str,
-) -> Option<Type<'db>> {
+) -> Option<PrefetchedRelation<'db>> {
     let related = model
         .member(db, env, lookup)
         .place
         .ignore_possibly_undefined()?;
     if let Some(manager) = base_specialization(db, env, related, KnownClass::DjangoBaseManager) {
-        return manager.types(db).first().copied();
+        return Some(PrefetchedRelation::Many(*manager.types(db).first()?));
     }
-    related
+    let is_model_instance = related
+        .filter_union(db, env, |element| !element.is_none(db))
+        .nominal_class(db, env)
+        .and_then(|class| class.static_class_literal(db))
+        .is_some_and(|(class, _)| is_model(db, class));
+    if !is_model_instance {
+        return None;
+    }
+    // A reverse accessor that is not a manager belongs to a `OneToOneField`, or to the link from
+    // a child model to its parent, which is also a `OneToOneField`.
+    let is_reverse_one_to_one = model
         .nominal_class(db, env)?
-        .static_class_literal(db)
-        .is_some_and(|(class, _)| is_model(db, class))
-        .then_some(related)
+        .iter_mro(db)
+        .filter_map(ClassBase::into_class)
+        .filter_map(|base| base.static_class_literal(db))
+        .any(|(base, _)| is_model(db, base) && reverse_accessor(db, base, lookup).is_some());
+    Some(PrefetchedRelation::Single(if is_reverse_one_to_one {
+        UnionType::from_two_elements(db, env, related, Type::none(db, env))
+    } else {
+        related
+    }))
 }
 
 /// Return the type arguments of the class `known` in the MRO of the class of the instance type
