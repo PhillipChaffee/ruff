@@ -239,6 +239,18 @@ pub(super) fn inherited_manager<'db>(
 /// # The default manager of Book is `objects`.
 /// ```
 ///
+/// A model that declares no manager in its own body and has no `default_manager_name` of its own
+/// uses the `default_manager_name` of the first model after it in its MRO, whether that model is
+/// abstract or not. This mirrors `Options.default_manager` in Django:
+/// ```py
+/// if not default_manager_name and not self.local_managers:
+///     # Get the first parent's default_manager_name if there's one.
+///     for parent in self.model.mro()[1:]:
+///         if hasattr(parent, "_meta"):
+///             default_manager_name = parent._meta.default_manager_name
+///             break
+/// ```
+///
 /// Returns `None` for a model without a manager of its own, whose default manager is the
 /// `objects` manager that Django adds.
 #[salsa::tracked(returns(copy), cycle_initial=|_, _, _| None, heap_size=ruff_memory_usage::heap_size)]
@@ -247,7 +259,6 @@ pub(super) fn default_manager<'db>(
     model: StaticClassLiteral<'db>,
 ) -> Option<Type<'db>> {
     let env = ProgramEnvironment::from_scope(model.body_scope(db));
-    let name = default_manager_name(db, &env, model);
     let is_manager = |ty: Type<'db>| {
         ty.nominal_class(db, &env).is_some_and(|class| {
             class
@@ -256,6 +267,25 @@ pub(super) fn default_manager<'db>(
                 .any(|base| base.is_known(db, KnownClass::DjangoBaseManager))
         })
     };
+    let mut name = default_manager_name(db, &env, model);
+    if name.is_none() {
+        let scope = model.body_scope(db);
+        let declares_manager = place_table(db, scope).symbols().any(|symbol| {
+            class_member(db, scope, symbol.name().as_str())
+                .ignore_possibly_undefined()
+                .is_some_and(is_manager)
+        });
+        if !declares_manager {
+            name = model
+                .iter_mro(db, None)
+                .filter_map(ClassBase::into_class)
+                .filter_map(|base| base.static_class_literal(db))
+                .map(|(base, _)| base)
+                .skip(1)
+                .find(|base| is_model(db, *base))
+                .and_then(|parent| default_manager_name(db, &env, parent));
+        }
+    }
     model
         .iter_mro(db, None)
         .filter_map(ClassBase::into_class)
