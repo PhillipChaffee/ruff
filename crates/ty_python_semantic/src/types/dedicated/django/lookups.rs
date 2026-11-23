@@ -22,7 +22,10 @@ pub(super) const LOOKUP_SEP: &str = "__";
 pub(super) enum ModelNameKind<'db> {
     /// A field that holds a value, such as `title`, `author_id` or `pk`. A name that follows it in
     /// a path is a transform or a lookup, such as `length` in `title__length`.
-    Field { null: bool },
+    ///
+    /// `is_alias` is whether the name is another name for the value of a field rather than the
+    /// name of a field: `pk`, or `author_id`, the ID attribute of the foreign key `author`.
+    Field { null: bool, is_alias: bool },
     /// A relation field of the model: a foreign key, a one-to-one field or a many-to-many field.
     /// `related` is the related model, or `None` if we cannot resolve it.
     ForwardRelation {
@@ -43,10 +46,24 @@ impl ModelNameKind<'_> {
     /// because the row can have no related row.
     pub(super) fn is_nullable(self) -> bool {
         match self {
-            Self::Field { null } => null,
+            Self::Field { null, .. } => null,
             Self::ForwardRelation { null, is_many, .. } => null || is_many,
             Self::ReverseRelation { .. } => true,
         }
+    }
+
+    /// Returns whether the name is a relation that leads to at most one row, which
+    /// `select_related()` can follow: a forward relation that is not many-to-many, or a
+    /// one-to-one relation from another model.
+    fn is_relation_to_one_row(self) -> bool {
+        matches!(
+            self,
+            Self::ForwardRelation { is_many: false, .. }
+                | Self::ReverseRelation {
+                    is_one_to_one: true,
+                    ..
+                }
+        )
     }
 }
 
@@ -92,7 +109,10 @@ fn model_names<'db>(db: &'db dyn Db, model: StaticClassLiteral<'db>) -> ModelNam
     let env = ProgramEnvironment::from_scope(model.body_scope(db));
     let mut names = vec![ModelName {
         name: Name::new_static("pk"),
-        kind: ModelNameKind::Field { null: false },
+        kind: ModelNameKind::Field {
+            null: false,
+            is_alias: true,
+        },
     }];
     let mut is_complete = true;
     let mut has_primary_key = false;
@@ -134,7 +154,10 @@ fn model_names<'db>(db: &'db dyn Db, model: StaticClassLiteral<'db>) -> ModelNam
             if !(is_foreign_key || is_many) {
                 names.push(ModelName {
                     name: field.name.clone(),
-                    kind: ModelNameKind::Field { null },
+                    kind: ModelNameKind::Field {
+                        null,
+                        is_alias: false,
+                    },
                 });
                 continue;
             }
@@ -152,7 +175,10 @@ fn model_names<'db>(db: &'db dyn Db, model: StaticClassLiteral<'db>) -> ModelNam
             if is_foreign_key {
                 names.push(ModelName {
                     name: Name::new(format!("{}_id", field.name)),
-                    kind: ModelNameKind::Field { null },
+                    kind: ModelNameKind::Field {
+                        null,
+                        is_alias: true,
+                    },
                 });
             }
         }
@@ -173,7 +199,10 @@ fn model_names<'db>(db: &'db dyn Db, model: StaticClassLiteral<'db>) -> ModelNam
             });
             names.push(ModelName {
                 name: Name::new(format!("{parent}_ptr_id")),
-                kind: ModelNameKind::Field { null: false },
+                kind: ModelNameKind::Field {
+                    null: false,
+                    is_alias: true,
+                },
             });
         }
         // A model also has the relations to its concrete parents.
@@ -192,7 +221,10 @@ fn model_names<'db>(db: &'db dyn Db, model: StaticClassLiteral<'db>) -> ModelNam
     if !has_primary_key {
         names.push(ModelName {
             name: Name::new_static("id"),
-            kind: ModelNameKind::Field { null: false },
+            kind: ModelNameKind::Field {
+                null: false,
+                is_alias: false,
+            },
         });
     }
 
@@ -495,37 +527,66 @@ impl FieldNamesMethod {
                     format!("Cannot resolve keyword '{name}' into field")
                 }
                 Self::OnlyOrDefer => format!("{} has no field named '{name}'", model.name(db)),
-                Self::SelectRelated => {
-                    format!("Invalid field name(s) given in select_related: '{name}'")
-                }
+                Self::SelectRelated => select_related_error(db, model, name, false),
             });
         }
         if self != Self::SelectRelated {
             return None;
         }
-        // `select_related()` follows the relations that lead to a single row: forward relations
-        // that are not many-to-many, and one-to-one relations from another model.
+        // `select_related()` only follows the relations that lead to a single row. Django looks
+        // up any other name among the fields of the model, so it reports an ID attribute such as
+        // `author_id`, or `pk`, as an invalid name rather than as a field that is not a relation.
         for step in &resolved.steps {
-            let name = step.name;
-            match step.resolved?.1 {
-                ModelNameKind::ForwardRelation { is_many: false, .. }
-                | ModelNameKind::ReverseRelation {
-                    is_one_to_one: true,
-                    ..
-                } => {}
-                ModelNameKind::Field { .. } => {
-                    return Some(format!(
-                        "Non-relational field given in select_related: '{name}'"
-                    ));
-                }
-                ModelNameKind::ForwardRelation { .. } | ModelNameKind::ReverseRelation { .. } => {
-                    return Some(format!(
-                        "Invalid field name(s) given in select_related: '{name}'"
-                    ));
-                }
+            let (model, kind) = step.resolved?;
+            if kind.is_relation_to_one_row() {
+                continue;
             }
+            let is_non_relational = matches!(
+                kind,
+                ModelNameKind::Field {
+                    is_alias: false,
+                    ..
+                }
+            );
+            return Some(select_related_error(
+                db,
+                model,
+                step.name,
+                is_non_relational,
+            ));
         }
         None
+    }
+}
+
+/// Return Django's error for the name `name` of `model` in `select_related()`: either a field of
+/// the model that is not a relation, or a name that is not a relation to a single row. The error
+/// lists the names that `select_related()` accepts on `model`:
+/// ```text
+/// Invalid field name(s) given in select_related: 'author_id'. Choices are: author
+/// ```
+fn select_related_error<'db>(
+    db: &'db dyn Db,
+    model: StaticClassLiteral<'db>,
+    name: &str,
+    is_non_relational: bool,
+) -> String {
+    let choices = model_names(db, model)
+        .names
+        .iter()
+        .filter(|model_name| model_name.kind.is_relation_to_one_row())
+        .map(|model_name| model_name.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let choices = if choices.is_empty() {
+        "(none)"
+    } else {
+        &choices
+    };
+    if is_non_relational {
+        format!("Non-relational field given in select_related: '{name}'. Choices are: {choices}")
+    } else {
+        format!("Invalid field name(s) given in select_related: '{name}'. Choices are: {choices}")
     }
 }
 
