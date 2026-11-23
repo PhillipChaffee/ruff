@@ -3,7 +3,7 @@
 
 use ruff_python_ast::name::Name;
 use rustc_hash::FxHashSet;
-use ty_module_resolver::{KnownModule, file_to_module};
+use ty_module_resolver::KnownModule;
 use ty_python_core::place_table;
 
 use crate::place::known_module_symbol;
@@ -16,10 +16,10 @@ use crate::types::{
 };
 use crate::{Db, ProgramEnvironment};
 
-use super::fields::{Field, model_metadata, own_model_fields};
+use super::fields::{Field, model_field_type, model_metadata, own_model_fields};
 use super::project::project_models;
 use super::relations::{is_foreign_key, refined_field_type, related_model};
-use super::{inherits_from, is_model};
+use super::{inherits_from, is_django_class, is_model};
 
 /// Synthesize the `__init__` method of a model, with one keyword parameter per name that Django's
 /// `Model.__init__` accepts.
@@ -83,7 +83,7 @@ pub(super) fn init_method<'db>(
 
         for field in own_model_fields(db, base) {
             has_primary_key |= field.metadata.primary_key;
-            let field_ty = refined_field_type(db, env, base, &field.symbol, field.ty)
+            let field_ty = model_field_type(db, env, base, &field.symbol, field.ty)
                 .unwrap_or(field.ty)
                 .apply_optional_specialization(db, base_specialization);
             let Some(field_class) = field_ty.nominal_class(db, env) else {
@@ -648,9 +648,6 @@ pub(super) fn contributed_attribute_type<'db>(
         .iter_mro(db)
         .filter_map(ClassBase::into_class)
         .filter_map(|base| base.static_class_literal(db))
-        .any(|(base, _)| {
-            file_to_module(db, base.body_scope(db).program_file(db).resolver_file(db))
-                .is_some_and(|module| module.name(db).first_component() == "django")
-        });
+        .any(|(base, _)| is_django_class(db, base));
     (!comes_from_django).then(Type::any)
 }

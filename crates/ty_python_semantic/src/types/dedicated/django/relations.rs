@@ -13,7 +13,7 @@ use crate::types::{
 };
 use crate::{Db, ProgramEnvironment};
 
-use super::fields::{Field, model_metadata, own_model_fields};
+use super::fields::{Field, model_metadata, own_model_fields, specialized_field_type};
 use super::model::concrete_model;
 use super::project::{models_modules, project_models};
 use super::{inherits_from, is_model};
@@ -618,24 +618,7 @@ pub(in crate::types) fn refined_field_type<'db>(
         .find(|field| field.name == name)?;
     let model = related_model(db, env, class, class, field)?;
     let (write, read) = foreign_key_value_types(db, env, model, field.metadata.null);
-
-    // Specialize the field class itself, or its nearest generic base class if it is not generic.
-    let generic_class = field_class
-        .iter_mro(db, None)
-        .filter_map(ClassBase::into_class)
-        .filter_map(|base| base.static_class_literal(db))
-        .map(|(base, _)| base)
-        .find(|base| {
-            base.generic_context(db)
-                .is_some_and(|generic_context| generic_context.len(db) == 2)
-        })?;
-    Some(Type::instance(
-        db,
-        env,
-        generic_class.apply_specialization(db, |generic_context| {
-            generic_context.specialize(db, vec![write, read])
-        }),
-    ))
+    specialized_field_type(db, env, field_class, write, read)
 }
 
 /// Return a more precise type for the `ManyToManyField` `name` of the model `class`, if the
