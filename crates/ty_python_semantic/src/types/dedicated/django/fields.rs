@@ -104,6 +104,7 @@ impl<'db> Field<'db> {
         field.metadata.related_name = string("related_name");
         field.metadata.related_query_name = string("related_query_name");
         field.metadata.parent_link = is_true("parent_link");
+        field.metadata.symmetrical = keyword("symmetrical").and_then(Type::as_bool_literal);
         field
     }
 }
@@ -119,6 +120,8 @@ pub(super) struct FieldMetadata {
     pub(super) parent_link: bool,
     pub(super) related_name: Option<Name>,
     pub(super) related_query_name: Option<Name>,
+    /// The `symmetrical` argument of a `ManyToManyField`, if it is a bool literal.
+    pub(super) symmetrical: Option<bool>,
 }
 
 /// All fields defined on this Django model (not including base class fields).
