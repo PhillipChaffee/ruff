@@ -150,8 +150,21 @@ fn declares_member<'db>(db: &'db dyn Db, class: StaticClassLiteral<'db>, name: &
 /// Author.objects.filter(book__title="Dune")  # the query name
 /// ```
 ///
-/// Django attaches the relations to a proxy model to the concrete model that the proxy is based
-/// on, so these relations have a query name on `class` but no reverse accessor.
+/// Django adds the reverse accessor of a relation to the concrete model of its related model, so
+/// the reverse accessor of a relation to a proxy model belongs to the concrete model, and the
+/// proxy models inherit it from there. The relation has a query name on both models:
+/// ```py
+/// class BookProxy(Book):
+///     class Meta:
+///         proxy = True
+///
+/// class Reader(models.Model):
+///     wish = models.ForeignKey(BookProxy, on_delete=models.CASCADE, related_name="wishers")
+///
+/// Book().wishers  # the reverse accessor, also available as `BookProxy().wishers`
+/// Book.objects.filter(wishers__id=1)
+/// BookProxy.objects.filter(wishers__id=1)
+/// ```
 #[salsa::tracked(returns(ref), cycle_initial=|_, _, _| IncomingRelations::default(), heap_size=ruff_memory_usage::heap_size)]
 pub(super) fn incoming_relations<'db>(
     db: &'db dyn Db,
@@ -241,16 +254,21 @@ pub(super) fn incoming_relations<'db>(
                     }
                     continue;
                 };
-                let is_target = related == target;
-                if !is_target
-                    && (concrete_target.is_none()
-                        || related
-                            .nominal_class(db, &env)
-                            .and_then(|related| concrete_model(db, related))
-                            != concrete_target)
+                let related_concrete = related
+                    .nominal_class(db, &env)
+                    .and_then(|related| concrete_model(db, related));
+                if related != target
+                    && (concrete_target.is_none() || related_concrete != concrete_target)
                 {
                     continue;
                 }
+                // Django adds the reverse accessor to the concrete model of the related model,
+                // even when the field refers to a proxy model (or a proxy of a proxy), and the
+                // proxy models inherit it from there.
+                let has_accessor = match related_concrete {
+                    Some(concrete) => concrete == class.default_specialization(db),
+                    None => related == target,
+                };
 
                 let is_one_to_one = inherits_from(db, field_class, KnownClass::DjangoOneToOneField);
                 let metadata = &field.metadata;
@@ -308,7 +326,7 @@ pub(super) fn incoming_relations<'db>(
                 let accessor =
                     accessor_name
                         .zip(accessor_ty)
-                        .filter(|_| is_target)
+                        .filter(|_| has_accessor)
                         .map(|(name, ty)| ReverseAccessor {
                             name: Name::new(name),
                             ty,
