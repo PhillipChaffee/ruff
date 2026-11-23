@@ -584,14 +584,20 @@ pub(super) fn installed_app_models_modules<'db>(
 /// Return the entries of the `INSTALLED_APPS` setting of the project of `program`, if we can
 /// determine them without running any code.
 ///
-/// The settings module, or a module that it star-imports, must always assign a list or tuple of
-/// string literals, a sum of such values, or names bound once to them (see
-/// [`expression_strings`]), and we must see every setting that it defines (see
-/// [`project_settings`]):
+/// Every binding of `INSTALLED_APPS` in the settings module, or in a module that it star-imports,
+/// must assign or add (`+=`) a list or tuple of string literals, a sum of such values, or names
+/// bound to them (see [`assigned_strings`]), and we must see every setting that the module defines
+/// (see [`project_settings`]):
 /// ```py
 /// DJANGO_APPS = ["django.contrib.auth"]
 /// INSTALLED_APPS = DJANGO_APPS + ["library"]
+/// if DEBUG:
+///     INSTALLED_APPS += ["debug_tools"]
 /// ```
+///
+/// We take every string that any binding contributes, even one that a later binding replaces or
+/// that runs only under a condition. An extra app can only add relations to the models, so this
+/// can hide a missing-attribute error but not cause one.
 fn installed_apps<'db>(db: &'db dyn Db, program: Program<'db>) -> Option<Vec<String>> {
     let project_settings = project_settings(db, program)?;
     if !project_settings.is_complete
@@ -605,42 +611,70 @@ fn installed_apps<'db>(db: &'db dyn Db, program: Program<'db>) -> Option<Vec<Str
     {
         return None;
     }
-    assigned_strings(db, project_settings.file, "INSTALLED_APPS", 0)
+    assigned_strings(db, project_settings.file, "INSTALLED_APPS", &mut Vec::new())
 }
 
 /// The deepest chain of names that [`assigned_strings`] follows, as in `INSTALLED_APPS = APPS`
-/// with `APPS = DJANGO_APPS + LOCAL_APPS`. It also stops names that refer to each other.
+/// with `APPS = DJANGO_APPS + LOCAL_APPS`.
 const MAX_SETTINGS_NAME_DEPTH: usize = 8;
 
-/// Return the strings of the list or tuple that the global scope of `file` assigns to `name`, if
-/// it binds `name` once. A star import is followed to the module that it imports from.
+/// Return the strings that the bindings of `name` in the global scope of `file` contribute: the
+/// list or tuple that an assignment assigns or that `+=` adds. A star import is followed to the
+/// module that it imports from.
+///
+/// `expanding` holds the names whose bindings we are collecting. A binding can refer to the same
+/// name, as in `INSTALLED_APPS = INSTALLED_APPS + ["library"]`. We collect every binding of that
+/// name anyway, so such a reference adds nothing.
 fn assigned_strings<'db>(
     db: &'db dyn Db,
-    mut file: ProgramFile<'db>,
+    file: ProgramFile<'db>,
     name: &str,
-    depth: usize,
+    expanding: &mut Vec<(ProgramFile<'db>, Name)>,
 ) -> Option<Vec<String>> {
-    if depth > MAX_SETTINGS_NAME_DEPTH {
+    if expanding
+        .iter()
+        .any(|(expanding_file, expanding_name)| *expanding_file == file && expanding_name == name)
+    {
+        return Some(Vec::new());
+    }
+    if expanding.len() > MAX_SETTINGS_NAME_DEPTH {
         return None;
     }
+    expanding.push((file, Name::new(name)));
+    let strings = binding_strings(db, file, name, expanding);
+    expanding.pop();
+    strings
+}
+
+/// The body of [`assigned_strings`], without the bookkeeping of `expanding`.
+fn binding_strings<'db>(
+    db: &'db dyn Db,
+    file: ProgramFile<'db>,
+    name: &str,
+    expanding: &mut Vec<(ProgramFile<'db>, Name)>,
+) -> Option<Vec<String>> {
     let program = file.program(db);
     let resolver_environment = ProgramEnvironment::from_program(program).resolver_environment(db);
-    let mut visited = FxHashSet::default();
-    while visited.insert(file) {
-        let scope = global_scope(db, file);
-        let symbol = place_table(db, scope).symbol_id(name)?;
-        let mut definitions = use_def_map(db, scope)
-            .end_of_scope_symbol_bindings(symbol)
-            .filter_map(|binding| binding.binding.definition());
-        let (Some(definition), None) = (definitions.next(), definitions.next()) else {
-            return None;
+    let scope = global_scope(db, file);
+    let symbol = place_table(db, scope).symbol_id(name)?;
+    let mut strings = Vec::new();
+    for binding in use_def_map(db, scope).reachable_symbol_bindings(symbol) {
+        let Some(definition) = binding.binding.definition() else {
+            continue;
         };
         let module = parsed_module(db, definition.python_file(db)).load(db);
-        let value = match definition.kind(db) {
+        let binding_strings = match definition.kind(db) {
             DefinitionKind::Assignment(assignment) if assignment.target(&module).is_name_expr() => {
-                assignment.value(&module)
+                expression_strings(db, file, assignment.value(&module), expanding)?
             }
-            DefinitionKind::AnnotatedAssignment(assignment) => assignment.value(&module)?,
+            DefinitionKind::AnnotatedAssignment(assignment) => {
+                expression_strings(db, file, assignment.value(&module)?, expanding)?
+            }
+            DefinitionKind::AugmentedAssignment(assignment)
+                if assignment.node(&module).op == ast::Operator::Add =>
+            {
+                expression_strings(db, file, &assignment.node(&module).value, expanding)?
+            }
             // `from .base import *`: look in the module that defines the setting.
             DefinitionKind::StarImport(import) => {
                 let imported = resolve_module_for_import_from(
@@ -649,24 +683,23 @@ fn assigned_strings<'db>(
                     import.import(&module),
                 )?
                 .file(db)?;
-                file = ProgramFile::new(db, imported, program);
-                continue;
+                assigned_strings(db, ProgramFile::new(db, imported, program), name, expanding)?
             }
             _ => return None,
         };
-        return expression_strings(db, file, value, depth);
+        strings.extend(binding_strings);
     }
-    None
+    Some(strings)
 }
 
 /// Return the strings of `expr` in the global scope of `file`: a list or tuple of string
-/// literals, a name that the module binds once to such a value, or a sum of such values, as in
+/// literals, a name that the module binds to such values, or a sum of such values, as in
 /// `INSTALLED_APPS = DJANGO_APPS + ["library"]`.
 fn expression_strings<'db>(
     db: &'db dyn Db,
     file: ProgramFile<'db>,
     expr: &ast::Expr,
-    depth: usize,
+    expanding: &mut Vec<(ProgramFile<'db>, Name)>,
 ) -> Option<Vec<String>> {
     match expr {
         ast::Expr::List(ast::ExprList { elts, .. })
@@ -680,11 +713,11 @@ fn expression_strings<'db>(
             right,
             ..
         }) => {
-            let mut strings = expression_strings(db, file, left, depth)?;
-            strings.extend(expression_strings(db, file, right, depth)?);
+            let mut strings = expression_strings(db, file, left, expanding)?;
+            strings.extend(expression_strings(db, file, right, expanding)?);
             Some(strings)
         }
-        ast::Expr::Name(name) => assigned_strings(db, file, name.id.as_str(), depth + 1),
+        ast::Expr::Name(name) => assigned_strings(db, file, name.id.as_str(), expanding),
         _ => None,
     }
 }
