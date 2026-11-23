@@ -30,8 +30,8 @@ use managers::{
 };
 pub(in crate::types) use model::is_automatic_primary_key_member;
 use model::{
-    PrimaryKeyMember, date_navigation_method, display_method, foreign_key_id_member, init_method,
-    model_exception, parent_link_member, primary_key_member,
+    PrimaryKeyMember, contributed_attribute_type, date_navigation_method, display_method,
+    foreign_key_id_member, init_method, model_exception, parent_link_member, primary_key_member,
 };
 use project::setting;
 pub(in crate::types) use project::type_alias_override;
@@ -160,7 +160,9 @@ pub(in crate::types) fn refined_class_member<'db>(
     if !is_model(db, class) {
         return None;
     }
-    refined_field_type(db, env, class, name, ty).or_else(|| bound_manager(db, env, class, ty))
+    contributed_attribute_type(db, env, ty)
+        .or_else(|| refined_field_type(db, env, class, name, ty))
+        .or_else(|| bound_manager(db, env, class, ty))
 }
 
 /// Return the type of a call to a method of a Django manager, queryset or app registry, for the
