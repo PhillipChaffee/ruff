@@ -365,8 +365,14 @@ impl<'db> ConstructorBinding<'db> {
             return return_ty;
         }
 
-        constructed_instance_type
-            .apply_optional_specialization(db, self.instance_return_specialization(db, env, None))
+        let instance = constructed_instance_type
+            .apply_optional_specialization(db, self.instance_return_specialization(db, env, None));
+        // A Django field's `null=True` argument decides whether its values include `None`,
+        // whatever the type context or explicit type arguments of the call say. This runs on the
+        // final specialization, after defaults have filled unsolved type variables; the foreign
+        // key hook in `instance_return_specialization` fills only unsolved slots, so it runs
+        // earlier. For a nullable foreign key both add `None`, which the union deduplicates.
+        django::nullable_field_type(db, env, instance, self.matching_overloads_with_downstream())
     }
 
     fn first_matching_overload(&self) -> Option<&Binding<'db>> {
@@ -374,6 +380,18 @@ impl<'db> ConstructorBinding<'db> {
             .matching_overloads()
             .map(|(_, overload)| overload)
             .next()
+    }
+
+    /// The first matching overload of this constructor method and of each constructor method
+    /// directly downstream of it.
+    fn matching_overloads_with_downstream(&self) -> impl Iterator<Item = &Binding<'db>> {
+        self.first_matching_overload().into_iter().chain(
+            self.downstream_constructor()
+                .into_iter()
+                .flat_map(Bindings::iter_callable_items)
+                .filter_map(CallableItem::as_constructor)
+                .filter_map(Self::first_matching_overload),
+        )
     }
 
     /// Combine inferred specializations from this constructor and downstream constructors. The
@@ -505,6 +523,9 @@ impl<'db> ConstructorBinding<'db> {
             let Some(mut types) = types else {
                 return;
             };
+            // A Django foreign key's `to` argument fills the slots that inference left unsolved.
+            // `null=True` is applied to the final type in `return_type`, see
+            // `django::nullable_field_type`.
             if let [write, read] = types.as_mut_slice()
                 && (write.is_none() || read.is_none())
                 && django::is_foreign_key(db, class_literal)
