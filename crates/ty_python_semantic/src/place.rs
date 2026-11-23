@@ -473,7 +473,6 @@ pub(crate) type LookupResult<'db> = Result<TypeAndQualifiers<'db>, LookupError<'
 
 /// Infer the public type of a symbol (its type as seen from outside its scope) in the given
 /// `scope`.
-#[allow(unused)]
 pub(crate) fn symbol<'db>(
     db: &'db dyn Db,
     scope: ScopeId<'db>,
