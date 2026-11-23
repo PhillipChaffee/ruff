@@ -71,6 +71,10 @@ impl ModelNameKind<'_> {
 struct ModelName<'db> {
     name: Name,
     kind: ModelNameKind<'db>,
+    /// Whether the name is the primary key of the model or of one of its concrete parents, under
+    /// any of its names: `pk`, `id`, the name of a field with `primary_key=True`, its ID attribute
+    /// if it is a foreign key, or the `<parent>_ptr` link to a concrete parent.
+    is_primary_key: bool,
 }
 
 /// The names that a path can use on a model.
@@ -88,6 +92,12 @@ impl<'db> ModelNames<'db> {
             .iter()
             .find(|model_name| model_name.name == name)
             .map(|model_name| model_name.kind)
+    }
+
+    fn is_primary_key(&self, name: &str) -> bool {
+        self.names
+            .iter()
+            .any(|model_name| model_name.is_primary_key && model_name.name == name)
     }
 }
 
@@ -113,6 +123,7 @@ fn model_names<'db>(db: &'db dyn Db, model: StaticClassLiteral<'db>) -> ModelNam
             null: false,
             is_alias: true,
         },
+        is_primary_key: true,
     }];
     let mut is_complete = true;
     let mut has_primary_key = false;
@@ -141,7 +152,8 @@ fn model_names<'db>(db: &'db dyn Db, model: StaticClassLiteral<'db>) -> ModelNam
         is_complete &= is_project_model(db, base);
 
         for field in own_model_fields(db, base) {
-            has_primary_key |= field.metadata.primary_key;
+            let is_primary_key = field.metadata.primary_key;
+            has_primary_key |= is_primary_key;
             let null = field.metadata.null;
             let field_class = field
                 .ty
@@ -158,6 +170,7 @@ fn model_names<'db>(db: &'db dyn Db, model: StaticClassLiteral<'db>) -> ModelNam
                         null,
                         is_alias: false,
                     },
+                    is_primary_key,
                 });
                 continue;
             }
@@ -171,6 +184,7 @@ fn model_names<'db>(db: &'db dyn Db, model: StaticClassLiteral<'db>) -> ModelNam
                     null,
                     is_many,
                 },
+                is_primary_key,
             });
             if is_foreign_key {
                 names.push(ModelName {
@@ -179,6 +193,7 @@ fn model_names<'db>(db: &'db dyn Db, model: StaticClassLiteral<'db>) -> ModelNam
                         null,
                         is_alias: true,
                     },
+                    is_primary_key,
                 });
             }
         }
@@ -186,7 +201,8 @@ fn model_names<'db>(db: &'db dyn Db, model: StaticClassLiteral<'db>) -> ModelNam
         if model_metadata(db, base).is_abstract {
             continue;
         }
-        // A model that inherits from a concrete model links to it through `<parent>_ptr`.
+        // A model that inherits from a concrete model links to it through `<parent>_ptr`, which
+        // is the primary key of the inheriting model.
         if base != model {
             let parent = base.name(db).to_lowercase();
             names.push(ModelName {
@@ -196,6 +212,7 @@ fn model_names<'db>(db: &'db dyn Db, model: StaticClassLiteral<'db>) -> ModelNam
                     null: false,
                     is_many: false,
                 },
+                is_primary_key: true,
             });
             names.push(ModelName {
                 name: Name::new(format!("{parent}_ptr_id")),
@@ -203,6 +220,7 @@ fn model_names<'db>(db: &'db dyn Db, model: StaticClassLiteral<'db>) -> ModelNam
                     null: false,
                     is_alias: true,
                 },
+                is_primary_key: true,
             });
         }
         // A model also has the relations to its concrete parents.
@@ -215,6 +233,7 @@ fn model_names<'db>(db: &'db dyn Db, model: StaticClassLiteral<'db>) -> ModelNam
                     related: relation.source,
                     is_one_to_one: relation.is_one_to_one,
                 },
+                is_primary_key: false,
             })
         }));
     }
@@ -225,6 +244,7 @@ fn model_names<'db>(db: &'db dyn Db, model: StaticClassLiteral<'db>) -> ModelNam
                 null: false,
                 is_alias: false,
             },
+            is_primary_key: true,
         });
     }
 
@@ -635,9 +655,10 @@ pub(super) fn report_field_names<'db>(
 
 /// Report the names in the `update_fields` argument of `Model.save()` or `Model.asave()` that are
 /// not fields that Django can update on `model`: the fields that hold a value and the forward
-/// relations to a single row.
+/// relations to a single row, except the primary key, which Django never updates.
 /// ```py
 /// book.save(update_fields=["title"])
+/// book.save(update_fields=["pk"])  # error
 /// ```
 pub(super) fn report_update_fields<'db>(
     context: &InferContext<'db, '_>,
@@ -659,6 +680,15 @@ pub(super) fn report_update_fields<'db>(
             continue;
         };
         let name = literal.value.to_str();
+        if model_names(db, model).is_primary_key(name) {
+            if let Some(builder) = context.report_lint(&INVALID_ARGUMENT_TYPE, element) {
+                builder.into_diagnostic(format_args!(
+                    "The following fields do not exist in this model, are m2m fields, primary \
+                     keys, or are non-concrete fields: {name}"
+                ));
+            }
+            continue;
+        }
         let resolved = resolve_path(db, &QueryContext::of_model(model), name);
         let is_updatable = resolved.error.is_none()
             && match &*resolved.steps {
