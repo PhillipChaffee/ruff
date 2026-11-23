@@ -3,7 +3,7 @@
 
 use ruff_python_ast::name::Name;
 use ty_module_resolver::{ImportingFile, KnownModule, ModuleName, file_to_module, resolve_module};
-use ty_python_core::ProgramFile;
+use ty_python_core::{ProgramFile, place_table};
 
 use crate::place::{global_symbol, known_module_symbol};
 use crate::types::call::Binding;
@@ -16,6 +16,7 @@ use crate::{Db, ProgramEnvironment};
 use super::fields::{
     Field, ModelReference, model_metadata, own_model_fields, specialized_field_type,
 };
+use super::managers::default_manager;
 use super::model::concrete_model;
 use super::project::{imported_model, models_modules, relation_source_models, user_model};
 use super::{inherits_from, is_model};
@@ -88,17 +89,52 @@ pub(super) struct IncomingRelations<'db> {
 /// We find the relation fields of the models in the module that defines the related model, in the
 /// project's `models` modules (see [`models_modules`]), and in the source of the installed apps
 /// outside the project (see [`relation_source_models`]).
+///
+/// A member that the model or one of its base classes declares is not a reverse accessor.
+/// Django's system checks reject a reverse accessor with the name of a field (fields.E302,
+/// fields.E304). A reverse accessor that replaces a method, property or manager is not checked, and
+/// at runtime it overwrites that member; we treat it as a mistake and keep the declared member.
+/// The same holds for the `objects` manager that Django adds to a model without managers.
+///
+/// Looking up these names without the relations also keeps the common module-level queries from
+/// depending on the models that the module defines after them:
+/// ```py
+/// Book.objects.all()
+///
+/// class Review(models.Model):
+///     book = models.ForeignKey(Book, on_delete=models.CASCADE)
+/// ```
+/// Finding the relations to `Book` requires knowing whether `Review` is a model, which depends on
+/// whether the statement `class Review` is reachable, and so on whether `Book.objects.all()`
+/// returns.
 pub(super) fn reverse_accessor<'db>(
     db: &'db dyn Db,
     class: StaticClassLiteral<'db>,
     name: &str,
 ) -> Option<Type<'db>> {
+    if declares_member(db, class, name) || name == "objects" && default_manager(db, class).is_none()
+    {
+        return None;
+    }
     incoming_relations(db, class)
         .relations
         .iter()
         .filter_map(|relation| relation.accessor.as_ref())
         .find(|accessor| accessor.name == name)
         .map(|accessor| accessor.ty)
+}
+
+/// Returns whether the body of `class` or of one of its base classes binds or declares `name`.
+fn declares_member<'db>(db: &'db dyn Db, class: StaticClassLiteral<'db>, name: &str) -> bool {
+    class
+        .iter_mro(db, None)
+        .filter_map(ClassBase::into_class)
+        .filter_map(|base| base.static_class_literal(db))
+        .any(|(base, _)| {
+            place_table(db, base.body_scope(db))
+                .symbol_by_name(name)
+                .is_some_and(|symbol| symbol.is_bound() || symbol.is_declared())
+        })
 }
 
 /// All relations that the project's models have to `class`.
