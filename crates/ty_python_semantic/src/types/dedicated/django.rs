@@ -28,11 +28,11 @@ use managers::{
     ModelKeywords, bound_manager, from_queryset_return_type, inherited_manager,
     manager_queryset_method, model_keywords_method, related_manager_member,
 };
-pub(in crate::types) use model::is_automatic_primary_key_member;
 use model::{
     PrimaryKeyMember, contributed_attribute_type, date_navigation_method, display_method,
     foreign_key_id_member, init_method, model_exception, parent_link_member, primary_key_member,
 };
+pub(in crate::types) use model::{is_automatic_primary_key_member, is_nullable_foreign_key_id};
 use project::setting;
 pub(in crate::types) use project::type_alias_override;
 use queryset::{
