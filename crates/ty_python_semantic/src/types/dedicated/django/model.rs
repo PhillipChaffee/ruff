@@ -71,12 +71,16 @@ pub(super) fn init_method<'db>(
             return None;
         }
 
-        // Django also accepts a keyword that names a property, and assigns the value to it.
-        keywords.extend(
-            own_property_names(db, base)
-                .iter()
-                .map(|name| (name.clone(), any)),
-        );
+        // Django also accepts a keyword that names a property, and assigns the value to it. The
+        // properties of `object`, such as `__class__`, are not included: Django's
+        // `_meta._property_names` for a model is just `['pk']`.
+        if !base.is_known(db, KnownClass::Object) {
+            keywords.extend(
+                own_property_names(db, base)
+                    .iter()
+                    .map(|name| (name.clone(), any)),
+            );
+        }
         if !is_model(db, base) {
             continue;
         }
