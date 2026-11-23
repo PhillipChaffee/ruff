@@ -165,6 +165,18 @@ Custom(source="import", anything=1)  # ok
 CustomChild(source="import", anything=1)  # ok
 ```
 
+A base class whose type we do not know can add fields and properties, so a model with such a base
+keeps the declared constructor, which accepts any keyword:
+
+```py
+def mixin() -> Any: ...
+
+class Tracked(mixin(), models.Model):
+    title = models.CharField(max_length=200)
+
+Tracked(tracked_at="2024-01-01")  # ok
+```
+
 `create()` and `acreate()` pass their keywords to the constructor, so they are checked in the same
 way:
 
@@ -178,6 +190,21 @@ def _(author: Author):
 
 async def _():
     await Book.objects.acreate(titel="Dune")  # error: [unknown-argument]
+```
+
+So does `create()` on a `QuerySet`:
+
+```py
+def _():
+    Book.objects.filter(title="Dune").create(titel="Dune")  # error: [unknown-argument]
+```
+
+`update()` does not call the constructor, so it takes the fields of a model that defines `__init__`,
+not the parameters of that method:
+
+```py
+Custom.objects.update(title="Dune")  # ok
+Custom.objects.update(source="import")  # error: [unknown-argument]
 ```
 
 The model's properties are keywords, but not the attributes that every object has:
@@ -578,6 +605,109 @@ def _(book: Book):
         reveal_type(book.shelf)  # revealed: Shelf | None
 ```
 
+The check can be part of a boolean expression:
+
+```py
+def _(book: Book):
+    if book.shelf_id is not None and book.shelf.label:
+        reveal_type(book.shelf)  # revealed: Shelf
+
+    if book.shelf_id is None or book.shelf.label:
+        reveal_type(book.shelf)  # revealed: Shelf | None
+    else:
+        reveal_type(book.shelf)  # revealed: Shelf
+```
+
+An `assert` or an early return narrows the code that follows:
+
+```py
+def _(book: Book):
+    assert book.shelf_id is not None
+    reveal_type(book.shelf)  # revealed: Shelf
+
+def _(book: Book) -> str:
+    if book.shelf_id is None:
+        return ""
+    reveal_type(book.shelf)  # revealed: Shelf
+    return book.shelf.label
+```
+
+The check also narrows the foreign key of `self` in a method of the model:
+
+```py
+class Novel(models.Model):
+    shelf = models.ForeignKey(Shelf, null=True, on_delete=models.SET_NULL)
+
+    def shelf_label(self) -> str:
+        if self.shelf_id is not None:
+            reveal_type(self.shelf)  # revealed: Shelf
+            return self.shelf.label
+        return ""
+```
+
+A nullable `OneToOneField` is a foreign key too, and a model inherits the foreign keys of its
+parent:
+
+```py
+class Edition(Book):
+    cover = models.OneToOneField(Shelf, null=True, on_delete=models.SET_NULL, related_name="+")
+
+def _(edition: Edition):
+    if edition.cover_id is not None:
+        reveal_type(edition.cover)  # revealed: Shelf
+    if edition.shelf_id is not None:
+        reveal_type(edition.shelf)  # revealed: Shelf
+```
+
+The result of the check can be stored in a variable first:
+
+```py
+def _(book: Book):
+    has_shelf = book.shelf_id is not None
+    if has_shelf:
+        reveal_type(book.shelf)  # revealed: Shelf
+    if not has_shelf:
+        reveal_type(book.shelf)  # revealed: None
+
+def _(book: Book):
+    no_shelf = book.shelf_id is None
+    if no_shelf:
+        reveal_type(book.shelf)  # revealed: None
+    else:
+        reveal_type(book.shelf)  # revealed: Shelf
+```
+
+A variable that holds the ID itself does not narrow the foreign key, and neither does a comparison
+with `==` or `!=`:
+
+```py
+def _(book: Book):
+    shelf_id = book.shelf_id
+    if shelf_id is not None:
+        reveal_type(book.shelf)  # revealed: Shelf | None
+
+    if book.shelf_id != None:
+        reveal_type(book.shelf)  # revealed: Shelf | None
+
+    if book.shelf_id == 1:
+        reveal_type(book.shelf)  # revealed: Shelf | None
+```
+
+Assigning to the instance or to the foreign key ends the narrowing. The foreign key is a descriptor,
+so after an assignment to it, we use its declared type:
+
+```py
+def _(book: Book, other: Book):
+    if book.shelf_id is not None:
+        book = other
+        reveal_type(book.shelf)  # revealed: Shelf | None
+
+def _(book: Book):
+    if book.shelf_id is not None:
+        book.shelf = None
+        reveal_type(book.shelf)  # revealed: Shelf | None
+```
+
 We do not notice an assignment to the ID after the check:
 
 ```py
@@ -672,6 +802,17 @@ from django.db.migrations.state import StateApps
 
 def _(state: StateApps):
     reveal_type(state.get_model("library", "Book"))  # revealed: type[Any]
+```
+
+We only find the models of the project's apps, so a model of an installed package keeps the declared
+type too:
+
+`auth_report.py`:
+
+```py
+from django.apps import apps
+
+reveal_type(apps.get_model("auth", "User"))  # revealed: type[Any]
 ```
 
 ## Choices
@@ -869,6 +1010,20 @@ def _(abstract: InheritedAbstract):
     abstract.id  # error: [missing-attribute]
 ```
 
+A model does not inherit the `Meta` class of a concrete parent, and can declare an unrelated one:
+
+```py
+class Book(models.Model):
+    title = models.CharField(max_length=200)
+
+    class Meta:
+        ordering = ["title"]
+
+class Ebook(Book):
+    class Meta:  # ok
+        ordering = ["-title"]
+```
+
 ### Multiple inheritance
 
 An abstract base without a primary key does not shadow an inherited `id`, regardless of the base
@@ -1031,6 +1186,56 @@ def _(author: Author):
     reveal_type(author.toast_set.shout())  # revealed: str
 ```
 
+Only the first parent model counts. `Toast` has no `default_manager_name` of its own, because a
+model does not inherit the `Meta` class of a concrete parent, so its child `Roast` uses its first
+manager, `objects`:
+
+```py
+class Roast(Toast):
+    critic = models.ForeignKey(Author, on_delete=models.CASCADE, related_name="roasts")
+
+def _(author: Author):
+    author.roasts.shout()  # error: [missing-attribute]
+```
+
+A model that declares a manager does not use the `default_manager_name` of its parent. Its own
+managers come before the inherited ones:
+
+```py
+class Lecture(Speech):
+    author = models.ForeignKey(Author, on_delete=models.CASCADE)
+
+    quiet = models.Manager()
+
+def _(author: Author):
+    author.lecture_set.shout()  # error: [missing-attribute]
+```
+
+A model inherits the `Meta` class of an abstract parent, with its `default_manager_name`, whether or
+not it declares managers of its own:
+
+```py
+class Recital(models.Model):
+    objects = models.Manager()
+    loud = LoudManager()
+
+    class Meta:
+        abstract = True
+        default_manager_name = "loud"
+
+class Ballad(Recital):
+    author = models.ForeignKey(Author, on_delete=models.CASCADE)
+
+class Hymn(Recital):
+    author = models.ForeignKey(Author, on_delete=models.CASCADE)
+
+    quiet = models.Manager()
+
+def _(author: Author):
+    reveal_type(author.ballad_set.shout())  # revealed: str
+    reveal_type(author.hymn_set.shout())  # revealed: str
+```
+
 ## Reverse accessors across modules
 
 A relation that is declared in another app also adds a reverse accessor. Django imports the `models`
@@ -1084,6 +1289,37 @@ class Draft(models.Model):
 
 def _(author: Author):
     author.draft_set  # error: [missing-attribute]
+```
+
+A `models` package counts too, with each of its submodules:
+
+`billing/__init__.py`:
+
+```py
+```
+
+`billing/models/__init__.py`:
+
+```py
+```
+
+`billing/models/invoice.py`:
+
+```py
+from django.db import models
+from library.models import Author
+
+class Invoice(models.Model):
+    author = models.ForeignKey(Author, on_delete=models.CASCADE)
+```
+
+`library/views.py`:
+
+```py
+from library.models import Author
+
+def _(author: Author):
+    reveal_type(author.invoice_set.get())  # revealed: Invoice
 ```
 
 ## User model
@@ -1295,6 +1531,25 @@ Book.objects.default_ordering  # error: [missing-attribute]
 Book.objects.delete()  # error: [missing-attribute]
 ```
 
+A `create()` method that the custom `QuerySet` class defines replaces Django's, and keeps its own
+parameters:
+
+```py
+from typing import Any
+
+class ImportQuerySet(models.QuerySet["Import"]):
+    def create(self, **kwargs: Any) -> "Import":
+        return super().create(**{name.removeprefix("raw_"): value for name, value in kwargs.items()})
+
+class Import(models.Model):
+    title = models.CharField(max_length=200)
+
+    objects = ImportQuerySet.as_manager()
+
+def _():
+    reveal_type(Import.objects.create(raw_title="Dune"))  # revealed: Import
+```
+
 ## `values()` and `values_list()`
 
 `values()` returns each row as a dictionary, and `values_list()` returns it as a tuple, or as a
@@ -1432,6 +1687,28 @@ reveal_type(stats.article__count)  # revealed: Any
 reveal_type(stats.rating__max)  # revealed: Any
 ```
 
+A subclass of an aggregate is named after the function of the Django aggregate that it extends:
+
+```py
+class DistinctCount(Count):
+    pass
+
+def _():
+    distinct = Review.objects.annotate(DistinctCount("article")).get()
+    reveal_type(distinct.article__count)  # revealed: Any
+```
+
+Django has no name for an aggregate with a `filter`, and raises a `TypeError` that asks for one, so
+the instances get no attribute:
+
+```py
+from django.db.models import Q
+
+def _():
+    filtered = Review.objects.annotate(Count("article", filter=Q(rating=5))).get()
+    filtered.article__count  # error: [missing-attribute]
+```
+
 A custom `QuerySet` class gets the annotations too, and keeps its own methods:
 
 ```py
@@ -1519,6 +1796,18 @@ plain = Author.objects.prefetch_related(Prefetch("books")).get()
 plain.book_list  # error: [missing-attribute]
 ```
 
+A lookup that spans relations sets the attribute on the related objects at its end, not on the
+instances of the `QuerySet`:
+
+```py
+class Chapter(models.Model):
+    book = models.ForeignKey(Book, on_delete=models.CASCADE, related_name="chapters")
+
+def _():
+    author = Author.objects.prefetch_related(Prefetch("books__chapters", to_attr="chapter_list")).get()
+    author.chapter_list  # error: [missing-attribute]
+```
+
 ## Field assignments
 
 django-stubs declares the types that a field accepts on assignment. They are wider than the field's
@@ -1600,6 +1889,56 @@ def _(magazine: Magazine):
     reveal_type(magazine.topics)  # revealed: list[str]
     reveal_type(magazine.code)  # revealed: str
     magazine.code = ["x"]  # error: [invalid-assignment]
+```
+
+Without a return type on `from_db_value()`, the values have the return type that `to_python()`
+declares:
+
+```py
+class TagListField(models.CharField):
+    def from_db_value(self, value, expression, connection):
+        return value.split(",")
+
+    def to_python(self, value: Any) -> list[str]:
+        return str(value).split(",")
+
+class Article(models.Model):
+    tags = TagListField(max_length=100)
+
+def _(article: Article):
+    reveal_type(article.tags)  # revealed: list[str]
+```
+
+An overloaded conversion method, or one whose decorator replaces the function, has no single
+declared return type, so it counts as a method without one:
+
+```py
+import functools
+from typing import overload
+
+class CodeListField(models.CharField):
+    @overload
+    def from_db_value(self, value: None, expression: Any, connection: Any) -> None: ...
+    @overload
+    def from_db_value(self, value: str, expression: Any, connection: Any) -> list[int]: ...
+    def from_db_value(self, value: str | None, expression: Any, connection: Any) -> list[int] | None:
+        return None if value is None else [int(code) for code in value.split(",")]
+
+    def to_python(self, value: Any) -> list[int]:
+        return [int(code) for code in str(value).split(",")]
+
+class CachedListField(models.CharField):
+    @functools.cache
+    def from_db_value(self, value: Any, expression: Any, connection: Any) -> list[str]:
+        return value.split(",")
+
+class Catalog(models.Model):
+    codes = CodeListField(max_length=100)
+    names = CachedListField(max_length=100)
+
+def _(catalog: Catalog):
+    reveal_type(catalog.codes)  # revealed: list[int]
+    reveal_type(catalog.names)  # revealed: Any
 ```
 
 ## Many-to-many fields
@@ -1703,6 +2042,21 @@ def _(film: Film):
     reveal_type(film.genres.first())  # revealed: Genre | None
 ```
 
+`create()` of the manager takes the keywords of the related model's constructor, and the
+`through_defaults` of the intermediate model:
+
+```py
+class Label(models.Model):
+    name = models.CharField(max_length=20)
+
+class Album(models.Model):
+    labels = models.ManyToManyField(Label)
+
+def _(album: Album):
+    reveal_type(album.labels.create(name="Indie", through_defaults={}))  # revealed: Label
+    album.labels.create(nme="Indie")  # error: [unknown-argument]
+```
+
 The related model gets a manager for the models that refer to it, with the same intermediate model.
 Its name is the `related_name`, or the lowercase name of the source model followed by `_set`:
 
@@ -1728,6 +2082,29 @@ itself has no reverse accessor:
 def _(shelf: Shelf, person: Person):
     shelf.volume_set  # error: [missing-attribute]
     person.person_set  # error: [missing-attribute]
+```
+
+With `symmetrical=False`, a relation from a model to itself goes one way, and the model gets a
+reverse accessor for the other way:
+
+```py
+class Reader(models.Model):
+    follows = models.ManyToManyField("self", symmetrical=False)
+
+def _(reader: Reader):
+    reveal_type(reader.follows)  # revealed: ManyRelatedManager[Reader, Reader_follows]
+    reveal_type(reader.reader_set)  # revealed: ManyRelatedManager[Reader, Reader_follows]
+```
+
+When we cannot resolve the model of the intermediate table, its type is unknown:
+
+```py
+class Course(models.Model):
+    tags = models.ManyToManyField(Tag, through="Enrollment")
+
+def _(course: Course, tag: Tag):
+    reveal_type(course.tags)  # revealed: ManyRelatedManager[Tag, Any]
+    reveal_type(tag.course_set)  # revealed: ManyRelatedManager[Course, Unknown]
 ```
 
 ## Managers
@@ -1833,6 +2210,36 @@ def _(book: Book):
     reveal_type(book.note)  # revealed: Note
 ```
 
+Django only calls the method on an object that is not a class, so a class with the method, and a
+method of the model itself, keep their types:
+
+```py
+class Magazine(models.Model):
+    trail_class = AuditTrail
+
+    def summary(self) -> str:
+        return ""
+
+reveal_type(Magazine.trail_class)  # revealed: <class 'AuditTrail'>
+
+def _(magazine: Magazine):
+    reveal_type(magazine.summary())  # revealed: str
+```
+
+Django looks the method up with `hasattr()`, which finds any attribute on an object whose class
+defines `__getattr__`, so such an attribute has the type `Any` too:
+
+```py
+class Proxy:
+    def __getattr__(self, name: str) -> Any:
+        raise NotImplementedError
+
+class Report(models.Model):
+    options = Proxy()
+
+reveal_type(Report.options)  # revealed: Any
+```
+
 A subclass of a Django class keeps its type, even when it overrides `contribute_to_class`:
 
 ```py
@@ -1888,8 +2295,8 @@ Book.objects.order_by("author__nme")  # error: [invalid-argument-type] "Cannot r
 
 ```py
 Book.objects.only("title", "author__name")  # ok
-Book.objects.only("titel")  # error: [invalid-argument-type]
-Book.objects.defer("titel")  # error: [invalid-argument-type]
+Book.objects.only("titel")  # error: [invalid-argument-type] "Book has no field named 'titel'"
+Book.objects.defer("titel")  # error: [invalid-argument-type] "Book has no field named 'titel'"
 ```
 
 `select_related()` only takes relations:
@@ -1921,12 +2328,30 @@ Book.objects.values("titel")  # error: [invalid-argument-type] "Cannot resolve k
 Book.objects.values_list("author__nme")  # error: [invalid-argument-type] "Cannot resolve keyword 'nme' into field"
 ```
 
+`values()` adds its keyword arguments to the query before it resolves the field names, so a field
+name can also name one of them. We do not see the names that `**` unpacks, so we do not check the
+field names of such a call:
+
+```py
+from typing import Any
+
+from django.db.models.functions import Length
+
+Book.objects.values("title_length", title_length=Length("title"))  # ok
+
+def _(expressions: dict[str, Any]):
+    Book.objects.values("titel", **expressions)  # ok
+```
+
 The `update_fields` of `save()` name fields of the model:
 
 ```py
 def _(book: Book):
-    book.save(update_fields=["title", "author"])  # ok
-    book.save(update_fields=["titel"])  # error: [invalid-argument-type]
+    book.save(update_fields=["title", "author", "author_id"])  # ok
+    book.save(update_fields=["titel"])  # error: [invalid-argument-type] "'titel' is not a field of `Book` that can be updated"
+
+async def _(book: Book):
+    await book.asave(update_fields=["titel"])  # error: [invalid-argument-type]
 ```
 
 `update()` takes the new field values as keywords, which are checked like the keywords of the
@@ -1935,6 +2360,9 @@ constructor:
 ```py
 reveal_type(Book.objects.filter(title="Dune").update(title="Dune Messiah"))  # revealed: int
 Book.objects.update(titel="Dune")  # error: [unknown-argument]
+
+async def _():
+    await Book.objects.aupdate(titel="Dune")  # error: [unknown-argument]
 ```
 
 We only check models that the project defines. An installed app can add relations to its own models
@@ -1944,6 +2372,152 @@ and to other apps' models, which we might not see:
 from django.contrib.auth.models import User
 
 User.objects.order_by("nickname")  # ok
+```
+
+## Field names of relations
+
+The field names of queryset methods can name the relations of a model. In this section, `Book` has a
+foreign key, a relation from another model's foreign key, a one-to-one relation from another model,
+and a relation from another model's many-to-many field:
+
+```py
+from django.db import models
+
+class Author(models.Model):
+    name = models.CharField(max_length=100)
+
+class Book(models.Model):
+    title = models.CharField(max_length=200)
+    author = models.ForeignKey(Author, on_delete=models.CASCADE, related_name="books")
+
+class Review(models.Model):
+    book = models.ForeignKey(Book, on_delete=models.CASCADE, related_name="reviews", related_query_name="review")
+    rating = models.IntegerField()
+
+class Cover(models.Model):
+    book = models.OneToOneField(Book, on_delete=models.CASCADE)
+
+class Shelf(models.Model):
+    books = models.ManyToManyField(Book)
+```
+
+A relation from another model is named in queries by the `related_query_name` of its field, if it
+has one, rather than by its `related_name`:
+
+```py
+Book.objects.order_by("review__rating")  # ok
+Book.objects.order_by("reviews__rating")  # error: [invalid-argument-type] "Cannot resolve keyword 'reviews' into field"
+```
+
+`select_related()` also follows a one-to-one relation from another model, but not a relation that
+can lead to several rows, such as a many-to-many field or a foreign key from another model. The
+error lists the relations that it can follow on the model, or `(none)`:
+
+```py
+Book.objects.select_related("cover")  # ok
+
+# error: [invalid-argument-type] "Invalid field name(s) given in select_related: 'reviews'. Choices are: author, cover"
+Book.objects.select_related("reviews")
+# error: [invalid-argument-type] "Invalid field name(s) given in select_related: 'books'. Choices are: (none)"
+Shelf.objects.select_related("books")
+# error: [invalid-argument-type] "Non-relational field given in select_related: 'name'. Choices are: (none)"
+Author.objects.select_related("name")
+```
+
+The `update_fields` of `save()` can name a foreign key, but Django only updates the fields that hold
+a value and the forward relations to a single row. It rejects a path, a many-to-many field and a
+relation from another model. The names can also be given as a tuple or a set:
+
+```py
+def _(book: Book, shelf: Shelf):
+    book.save(update_fields=["author"])  # ok
+    book.save(update_fields=("author__name",))  # error: [invalid-argument-type]
+    book.save(update_fields={"cover"})  # error: [invalid-argument-type] "'cover' is not a field of `Book` that can be updated"
+    shelf.save(update_fields=["books"])  # error: [invalid-argument-type] "'books' is not a field of `Shelf` that can be updated"
+```
+
+## Field names that we cannot all see
+
+We do not check the field names of a model that a relation might refer to without us knowing it. A
+reference to a model of an app that we cannot find might name the model, and so might a
+`related_name` with `%(app_label)s`, because we do not know the label of an app:
+
+```py
+from django.db import models
+
+class Author(models.Model):
+    name = models.CharField(max_length=100)
+
+class Note(models.Model):
+    author = models.ForeignKey("elsewhere.Author", on_delete=models.CASCADE)
+
+class Editor(models.Model):
+    name = models.CharField(max_length=100)
+
+class Publication(models.Model):
+    editor = models.ForeignKey(Editor, on_delete=models.CASCADE, related_name="%(app_label)s_%(class)ss")
+
+    class Meta:
+        abstract = True
+
+class Book(Publication):
+    pass
+
+def _():
+    Author.objects.order_by("note")  # ok
+    Editor.objects.order_by("library_books")  # ok
+```
+
+A base class whose type we do not know can add fields too:
+
+```py
+from typing import Any
+
+def mixin() -> Any: ...
+
+class Tracked(mixin(), models.Model):
+    title = models.CharField(max_length=200)
+
+def _():
+    Tracked.objects.order_by("tracked_at")  # ok
+```
+
+## Field names in custom querysets
+
+A custom manager or `QuerySet` class can add names to its queries that are not part of its type, for
+example with `annotate()` in `get_queryset()`, so we do not check the field names of its queries:
+
+```py
+from django.db import models
+
+class StoryQuerySet(models.QuerySet["Story"]):
+    def with_rating(self) -> "StoryQuerySet":
+        return self.order_by("rating")  # ok
+
+class Story(models.Model):
+    title = models.CharField(max_length=200)
+
+    objects = StoryQuerySet.as_manager()
+
+Story.objects.order_by("rating")  # ok
+```
+
+Nor do we check a method of the project that overrides one of Django's methods, because it can
+accept other names:
+
+```py
+from typing import Any, Self
+
+class LabelQuerySet(models.QuerySet["Label"]):
+    def order_by(self, *field_names: Any) -> Self:
+        return super().order_by(*[name.removeprefix("by_") for name in field_names])
+
+class Label(models.Model):
+    text = models.CharField(max_length=100)
+
+    objects = LabelQuerySet.as_manager()
+
+Label.objects.all().order_by("by_text")  # ok
 ```
 
 ## Model forms
@@ -2323,6 +2897,17 @@ def _(book: Book):
     reveal_type(book.ebook)  # revealed: Ebook
 ```
 
+A proxy model uses the table of its parent, so the parent has no accessor for it:
+
+```py
+class BookProxy(Book):
+    class Meta:
+        proxy = True
+
+def _(book: Book):
+    book.bookproxy  # error: [missing-attribute]
+```
+
 ## Choices attributes
 
 A `Choices` class has `choices`, `values` and `labels` attributes, and each member has a `label`:
@@ -2455,6 +3040,87 @@ reveal_type(settings.NOT_A_SETTING)  # revealed: Any
 
 A settings module can also define settings in ways that we cannot follow. We do not report unknown
 settings then.
+
+### Through a module `__getattr__`
+
+A module-level `__getattr__` function can return any setting:
+
+`manage.py`:
+
+```py
+import os
+
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "mysite.settings")
+```
+
+`mysite/__init__.py`:
+
+```py
+```
+
+`mysite/settings.py`:
+
+```py
+def __getattr__(name: str) -> int:
+    return 0
+
+RETRY_LIMIT = 3
+```
+
+`app.py`:
+
+```py
+from django.conf import settings
+
+reveal_type(settings.RETRY_LIMIT)  # revealed: int
+reveal_type(settings.NOT_A_SETTING)  # revealed: Any
+```
+
+### Through `split_settings`
+
+`django-split-settings` executes other files in the namespace of the settings module:
+
+`manage.py`:
+
+```py
+import os
+
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "mysite.settings")
+```
+
+`mysite/__init__.py`:
+
+```py
+```
+
+`split_settings/__init__.py`:
+
+```py
+```
+
+`split_settings/tools.py`:
+
+```py
+def include(*files: str) -> None: ...
+```
+
+`mysite/settings.py`:
+
+```py
+from split_settings.tools import include
+
+include("components/base.py")
+RETRY_LIMIT = 3
+```
+
+`app.py`:
+
+```py
+from django.conf import settings
+
+reveal_type(settings.RETRY_LIMIT)  # revealed: int
+reveal_type(settings.NOT_A_SETTING)  # revealed: Any
+```
 
 ### Through `setattr`
 
@@ -2616,7 +3282,7 @@ os.environ.setdefault("DJANGO_SETTINGS_MODULE", "mysite.settings")
 `mysite/settings.py`:
 
 ```py
-INSTALLED_APPS = ["django.contrib.auth", "django.contrib.contenttypes"]
+INSTALLED_APPS = ["django.contrib.auth", "django.contrib.contenttypes", "library"]
 ```
 
 `views.py`:
@@ -2630,6 +3296,35 @@ reveal_type(get_user_model())  # revealed: type[User]
 def _(request: HttpRequest):
     if request.user.is_authenticated:
         reveal_type(request.user)  # revealed: User
+```
+
+A relation field of the project can refer to the user model through `settings.AUTH_USER_MODEL`:
+
+`library/__init__.py`:
+
+```py
+```
+
+`library/models.py`:
+
+```py
+from django.conf import settings
+from django.db import models
+
+class Loan(models.Model):
+    reader = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="loans")
+```
+
+`loans.py`:
+
+```py
+from django.contrib.auth.models import User
+
+from library.models import Loan
+
+def _(loan: Loan, user: User):
+    reveal_type(loan.reader)  # revealed: User
+    reveal_type(user.loans.get())  # revealed: Loan
 ```
 
 ### Custom user model
@@ -2652,7 +3347,7 @@ os.environ.setdefault("DJANGO_SETTINGS_MODULE", "mysite.settings")
 `mysite/settings.py`:
 
 ```py
-INSTALLED_APPS = ["django.contrib.auth", "django.contrib.contenttypes", "accounts"]
+INSTALLED_APPS = ["django.contrib.auth", "django.contrib.contenttypes", "accounts", "library"]
 AUTH_USER_MODEL = "accounts.Member"
 ```
 
@@ -2684,6 +3379,35 @@ def _(request: HttpRequest):
 
     if request.user.is_authenticated:
         reveal_type(request.user.nickname)  # revealed: str
+```
+
+A relation to `settings.AUTH_USER_MODEL` refers to the custom user model, which gets the reverse
+accessor:
+
+`library/__init__.py`:
+
+```py
+```
+
+`library/models.py`:
+
+```py
+from django.conf import settings
+from django.db import models
+
+class Loan(models.Model):
+    reader = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="loans")
+```
+
+`loans.py`:
+
+```py
+from accounts.models import Member
+from library.models import Loan
+
+def _(loan: Loan, member: Member):
+    reveal_type(loan.reader)  # revealed: Member
+    reveal_type(member.loans.get())  # revealed: Loan
 ```
 
 ### User model in settings that we cannot fully see
@@ -2723,7 +3447,11 @@ reveal_type(get_user_model())  # revealed: type[AbstractUser]
 
 The models of installed apps can refer to the project's models, usually to the user model through
 `settings.AUTH_USER_MODEL`. Stubs declare such fields without their arguments, so we read the
-relations from the source of the apps that `INSTALLED_APPS` lists:
+relations from the source of the apps that `INSTALLED_APPS` lists.
+
+### Apps listed in `INSTALLED_APPS`
+
+Here, the `Token` model of Django REST framework's `authtoken` app refers to the custom user model:
 
 `manage.py`:
 
@@ -2776,6 +3504,371 @@ def _(member: Member):
     member.logentry_set  # error: [missing-attribute]
 
 Member.objects.order_by("auth_token__created")  # ok
+```
+
+### Models in a package
+
+The `models` module of an installed app can be a package that imports its models from submodules:
+
+`manage.py`:
+
+```py
+import os
+
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "mysite.settings")
+```
+
+`mysite/__init__.py`:
+
+```py
+```
+
+`mysite/settings.py`:
+
+```py
+INSTALLED_APPS = ["django.contrib.auth", "django.contrib.contenttypes", "bookmarks"]
+```
+
+`/.venv/<path-to-site-packages>/bookmarks/__init__.py`:
+
+```py
+```
+
+`/.venv/<path-to-site-packages>/bookmarks/models/__init__.py`:
+
+```py
+from .bookmark import Bookmark
+```
+
+`/.venv/<path-to-site-packages>/bookmarks/models/bookmark.py`:
+
+```py
+from django.conf import settings
+from django.db import models
+
+class Bookmark(models.Model):
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="bookmarks")
+```
+
+`views.py`:
+
+```py
+from django.contrib.auth.models import User
+
+def _(user: User):
+    reveal_type(user.bookmarks.get())  # revealed: Bookmark
+```
+
+### A model of an installed app imported by the project
+
+The module of the user model can import a model of an installed app, which makes that model one of
+the models of a project `models` module too. We still read its relations from the app's source:
+
+`manage.py`:
+
+```py
+import os
+
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "mysite.settings")
+```
+
+`mysite/__init__.py`:
+
+```py
+```
+
+`mysite/settings.py`:
+
+```py
+INSTALLED_APPS = [
+    "django.contrib.auth",
+    "django.contrib.contenttypes",
+    "rest_framework.authtoken",
+    "accounts",
+]
+AUTH_USER_MODEL = "accounts.Member"
+```
+
+`accounts/__init__.py`:
+
+```py
+```
+
+`accounts/models.py`:
+
+```py
+from django.contrib.auth.models import AbstractUser
+from rest_framework.authtoken.models import Token
+
+class Member(AbstractUser):
+    pass
+```
+
+`views.py`:
+
+```py
+from accounts.models import Member
+
+def _(member: Member):
+    reveal_type(member.auth_token)  # revealed: Token
+```
+
+### Names bound to lists
+
+`INSTALLED_APPS` can be the sum of lists that the settings module binds to names:
+
+`manage.py`:
+
+```py
+import os
+
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "mysite.settings")
+```
+
+`mysite/__init__.py`:
+
+```py
+```
+
+`mysite/settings.py`:
+
+```py
+DJANGO_APPS = ["django.contrib.admin", "django.contrib.auth", "django.contrib.contenttypes"]
+THIRD_PARTY_APPS = ["rest_framework.authtoken"]
+
+INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS
+```
+
+`views.py`:
+
+```py
+from django.contrib.auth.models import User
+
+def _(user: User):
+    reveal_type(user.auth_token)  # revealed: Token
+    reveal_type(user.logentry_set.get())  # revealed: LogEntry
+```
+
+### Sums of lists
+
+A sum of literal lists works too:
+
+`manage.py`:
+
+```py
+import os
+
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "mysite.settings")
+```
+
+`mysite/__init__.py`:
+
+```py
+```
+
+`mysite/settings.py`:
+
+```py
+INSTALLED_APPS = ["django.contrib.admin", "django.contrib.auth", "django.contrib.contenttypes"] + ["rest_framework.authtoken"]
+```
+
+`views.py`:
+
+```py
+from django.contrib.auth.models import User
+
+def _(user: User):
+    reveal_type(user.auth_token)  # revealed: Token
+    reveal_type(user.logentry_set.get())  # revealed: LogEntry
+```
+
+### Chains of names
+
+A name can be bound to another name, or to a sum that contains names:
+
+`manage.py`:
+
+```py
+import os
+
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "mysite.settings")
+```
+
+`mysite/__init__.py`:
+
+```py
+```
+
+`mysite/settings.py`:
+
+```py
+BASE_APPS = ["django.contrib.admin", "django.contrib.auth", "django.contrib.contenttypes"]
+APPS = BASE_APPS + ["rest_framework.authtoken"]
+
+INSTALLED_APPS = APPS
+```
+
+`views.py`:
+
+```py
+from django.contrib.auth.models import User
+
+def _(user: User):
+    reveal_type(user.auth_token)  # revealed: Token
+    reveal_type(user.logentry_set.get())  # revealed: LogEntry
+```
+
+### Augmented assignments
+
+`+=` adds apps to the list. We include the apps of every binding of `INSTALLED_APPS`:
+
+`manage.py`:
+
+```py
+import os
+
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "mysite.settings")
+```
+
+`mysite/__init__.py`:
+
+```py
+```
+
+`mysite/settings.py`:
+
+```py
+INSTALLED_APPS = ["django.contrib.admin", "django.contrib.auth", "django.contrib.contenttypes"]
+INSTALLED_APPS += ["rest_framework.authtoken"]
+```
+
+`views.py`:
+
+```py
+from django.contrib.auth.models import User
+
+def _(user: User):
+    reveal_type(user.auth_token)  # revealed: Token
+    reveal_type(user.logentry_set.get())  # revealed: LogEntry
+```
+
+### Star imports
+
+The settings module can add apps to the list of a module that it star-imports:
+
+`manage.py`:
+
+```py
+import os
+
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "mysite.settings")
+```
+
+`mysite/__init__.py`:
+
+```py
+```
+
+`mysite/base.py`:
+
+```py
+INSTALLED_APPS = ["django.contrib.admin", "django.contrib.auth", "django.contrib.contenttypes"]
+```
+
+`mysite/settings.py`:
+
+```py
+from .base import *
+
+INSTALLED_APPS += ["rest_framework.authtoken"]
+```
+
+`views.py`:
+
+```py
+from django.contrib.auth.models import User
+
+def _(user: User):
+    reveal_type(user.auth_token)  # revealed: Token
+    reveal_type(user.logentry_set.get())  # revealed: LogEntry
+```
+
+### `AppConfig` classes
+
+An entry can name an `AppConfig` class instead of a package. The `name` attribute of the class names
+the package of the app, and the class can inherit it, as `AdminConfig` does from
+`SimpleAdminConfig`:
+
+`manage.py`:
+
+```py
+import os
+
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "mysite.settings")
+```
+
+`mysite/__init__.py`:
+
+```py
+```
+
+`mysite/settings.py`:
+
+```py
+INSTALLED_APPS = [
+    "django.contrib.admin.apps.AdminConfig",
+    "django.contrib.auth",
+    "django.contrib.contenttypes",
+    "rest_framework.authtoken.apps.AuthTokenConfig",
+]
+```
+
+`views.py`:
+
+```py
+from django.contrib.auth.models import User
+
+def _(user: User):
+    reveal_type(user.auth_token)  # revealed: Token
+    reveal_type(user.logentry_set.get())  # revealed: LogEntry
+```
+
+### `INSTALLED_APPS` that we cannot read
+
+When a binding of `INSTALLED_APPS` is not a list of string literals that we can read, we do not know
+the installed apps, and do not read the relations of any of them:
+
+`manage.py`:
+
+```py
+import os
+
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "mysite.settings")
+```
+
+`mysite/__init__.py`:
+
+```py
+```
+
+`mysite/settings.py`:
+
+```py
+def get_apps() -> list[str]:
+    return ["rest_framework.authtoken"]
+
+INSTALLED_APPS = ["django.contrib.admin", "django.contrib.auth", "django.contrib.contenttypes"]
+INSTALLED_APPS += get_apps()
+```
+
+`views.py`:
+
+```py
+from django.contrib.auth.models import User
+
+def _(user: User):
+    user.auth_token  # error: [missing-attribute]
+    user.logentry_set  # error: [missing-attribute]
 ```
 
 ## Field names after annotations
