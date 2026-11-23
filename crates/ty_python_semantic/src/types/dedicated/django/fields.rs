@@ -1,7 +1,7 @@
 //! The fields of a model and its `Meta` options, read from the model's class body.
 
 use ruff_db::parsed::parsed_module;
-use ruff_python_ast::name::Name;
+use ruff_python_ast::{self as ast, name::Name};
 use ty_python_core::{
     definition::{Definition, DefinitionKind},
     place_table, semantic_index, use_def_map,
@@ -34,9 +34,9 @@ pub(super) struct Field<'db> {
     /// field construction has a `name` argument.
     pub(super) symbol: Name,
     pub(super) ty: Type<'db>,
-    /// The type of the first argument of the field construction, which names the related model
-    /// of a relation field: `Author` or `"Author"` in `ForeignKey(Author, ...)`.
-    pub(super) to: Option<Type<'db>>,
+    /// The first argument of the field construction, which names the related model of a relation
+    /// field: `Author` or `"Author"` in `ForeignKey(Author, ...)`.
+    pub(super) to: Option<ModelReference<'db>>,
     /// The type of the `through` argument of a `ManyToManyField`, which names the model of the
     /// intermediate table.
     pub(super) through: Option<Type<'db>>,
@@ -78,7 +78,7 @@ impl<'db> Field<'db> {
         field.to = call
             .arguments
             .find_argument_value("to", 0)
-            .map(|to| definition_expression_type(db, definition, to));
+            .map(|to| ModelReference::from_expression(db, definition, to));
         // The type of the keyword argument `name`, if the call passes it.
         let keyword = |name: &str| {
             call.arguments
@@ -107,6 +107,46 @@ impl<'db> Field<'db> {
         field.metadata.parent_link = is_true("parent_link");
         field.metadata.symmetrical = keyword("symmetrical").and_then(Type::as_bool_literal);
         field
+    }
+}
+
+/// The argument of a relation field that names its related model, or of a `ManyToManyField` that
+/// names the model of its intermediate table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, get_size2::GetSize, salsa::SalsaValue)]
+pub(super) enum ModelReference<'db> {
+    /// The type of the argument: a model class, or a string such as `"Author"`,
+    /// `"library.Author"` or `"self"`.
+    Type(Type<'db>),
+    /// `settings.AUTH_USER_MODEL`, which names the project's user model. Its type is only `str`,
+    /// so we recognize the attribute itself. Relations to the user model are usually written this
+    /// way, in the project and in installed apps:
+    /// ```py
+    /// from django.conf import settings
+    ///
+    /// class Token(models.Model):
+    ///     user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    /// ```
+    UserModelSetting,
+}
+
+impl<'db> ModelReference<'db> {
+    fn from_expression(db: &'db dyn Db, definition: Definition<'db>, expr: &ast::Expr) -> Self {
+        if let ast::Expr::Attribute(attribute) = expr
+            && attribute.attr.as_str() == "AUTH_USER_MODEL"
+            && definition_expression_type(db, definition, &attribute.value)
+                .is_instance_of(db, KnownClass::DjangoLazySettings)
+        {
+            return ModelReference::UserModelSetting;
+        }
+        ModelReference::Type(definition_expression_type(db, definition, expr))
+    }
+
+    /// The value of a reference given as a string literal.
+    pub(super) fn as_str(self, db: &'db dyn Db) -> Option<&'db str> {
+        match self {
+            ModelReference::Type(ty) => Some(ty.as_string_literal()?.value(db)),
+            ModelReference::UserModelSetting => None,
+        }
     }
 }
 
@@ -234,7 +274,7 @@ fn meta_setting<'db>(
     meta: StaticClassLiteral<'db>,
     name: &str,
 ) -> Option<bool> {
-    meta_value(db, env, meta, name).map(|value| value == Type::bool_literal(true))
+    class_body_value(db, env, meta, name).map(|value| value == Type::bool_literal(true))
 }
 
 /// Return the name of the manager that `Meta.default_manager_name` of the model `class` names.
@@ -270,18 +310,19 @@ pub(super) fn default_manager_name<'db>(
         .iter_mro(db, None)
         .filter_map(ClassBase::into_class)
         .map_while(|meta_base| meta_base.static_class_literal(db))
-        .find_map(|(meta_base, _)| meta_value(db, env, meta_base, "default_manager_name"))?;
+        .find_map(|(meta_base, _)| class_body_value(db, env, meta_base, "default_manager_name"))?;
     Some(name.as_string_literal()?.value(db))
 }
 
-/// Return the type of the value that the body of the `Meta` class `meta` assigns to `name`.
-fn meta_value<'db>(
+/// Return the type of the value that the body of the class `class` assigns to `name`, such as an
+/// option of a `Meta` class or the `name` of an `AppConfig` class.
+pub(super) fn class_body_value<'db>(
     db: &'db dyn Db,
     env: &ProgramEnvironment<'db>,
-    meta: StaticClassLiteral<'db>,
+    class: StaticClassLiteral<'db>,
     name: &str,
 ) -> Option<Type<'db>> {
-    let scope = meta.body_scope(db);
+    let scope = class.body_scope(db);
     let symbol = place_table(db, scope).symbol_id(name)?;
     // The public type of a literal is widened, such as `True` to `bool`, so read the bindings'
     // literal values instead.
