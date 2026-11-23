@@ -80,6 +80,9 @@ pub(super) struct IncomingRelations<'db> {
 /// # Author().book_set is a manager for Book; Author().profile has type Profile.
 /// ```
 ///
+/// A `ManyToManyField` adds a `ManyRelatedManager` for the source model, with the same
+/// intermediate model as the field itself.
+///
 /// We find the relation fields of the models in the module that defines the related model, and in
 /// the project's `models` modules (see [`models_modules`]).
 pub(super) fn reverse_accessor<'db>(
@@ -224,7 +227,17 @@ pub(super) fn incoming_relations<'db>(
                     }
                     None => Some(source_name.clone()),
                 };
+                // Django makes a many-to-many relation from a model to itself symmetrical by
+                // default, and a symmetrical relation has no reverse accessor: `person.friends`
+                // already holds the people on both sides of the relation.
+                let is_symmetrical = is_many_to_many
+                    && field
+                        .to
+                        .and_then(Type::as_string_literal)
+                        .is_some_and(|reference| reference.value(db) == "self")
+                    && metadata.symmetrical != Some(false);
                 let accessor_name = match related_name {
+                    _ if is_symmetrical => None,
                     Some(name) if name.ends_with('+') => None,
                     Some(name) => substitute(name),
                     None if is_one_to_one => Some(source_name.clone()),
@@ -233,7 +246,12 @@ pub(super) fn incoming_relations<'db>(
                 let accessor_ty = if is_one_to_one {
                     Some(source_ty)
                 } else if is_many_to_many {
-                    None
+                    // Both sides of the relation share the model of the intermediate table.
+                    let through = match field.through {
+                        Some(through) => model_reference(db, &env, declaring, source, through),
+                        None => automatic_through_model(db, &env, source, field, related),
+                    };
+                    many_related_manager(db, &env, source_ty, through.unwrap_or_else(Type::unknown))
                 } else {
                     related_manager(db, &env, source_ty)
                 };
@@ -283,6 +301,36 @@ fn related_manager<'db>(
             env,
             manager.apply_specialization(db, |generic_context| {
                 generic_context.specialize_partial(db, [Some(model), None])
+            }),
+        )
+    })
+}
+
+/// Return the type of the manager that a `ManyToManyField` adds to its related model: a manager
+/// for the source model `to`, whose intermediate model is `through`.
+fn many_related_manager<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+    to: Type<'db>,
+    through: Type<'db>,
+) -> Option<Type<'db>> {
+    let manager = known_module_symbol(
+        db,
+        env,
+        KnownModule::DjangoDbModelsFieldsRelatedDescriptors,
+        "ManyRelatedManager",
+    )
+    .place
+    .ignore_possibly_undefined()?
+    .as_class_literal()?
+    .as_static()?;
+    let generic_context = manager.generic_context(db)?;
+    (generic_context.len(db) == 2).then(|| {
+        Type::instance(
+            db,
+            env,
+            manager.apply_specialization(db, |generic_context| {
+                generic_context.specialize(db, vec![to, through])
             }),
         )
     })
