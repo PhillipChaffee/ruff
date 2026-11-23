@@ -280,6 +280,16 @@ def _(preferences: Preferences):
     reveal_type(preferences.pinned)  # revealed: bool | None
 ```
 
+`null=True` also adds `None` to the values of the base class `Field`, whose value types are `Any`:
+
+```py
+class Attachment(models.Model):
+    payload = models.Field(null=True)
+
+def _(attachment: Attachment):
+    reveal_type(attachment.payload)  # revealed: Any | None
+```
+
 `null` must be a literal for the stubs to choose a nullable type. Otherwise the annotation is used:
 
 ```py
@@ -292,8 +302,12 @@ def make_flag(nullable: bool) -> None:
 
 ```py
 class Profile(models.Model):
-    # error: [invalid-assignment]
+    # error: [invalid-assignment] "Object of type `BooleanField[bool | None, bool | None]` is not assignable to `BooleanField[bool, bool]`"
     confirmed: models.BooleanField = models.BooleanField[bool, bool](null=True)
+    seen = models.BooleanField[bool, bool](null=True)
+
+def _(profile: Profile):
+    reveal_type(profile.seen)  # revealed: bool | None
 ```
 
 A field subclass that declares its type arguments, and a field that converts its values, keep their
@@ -1368,6 +1382,55 @@ def _(author: Author):
     reveal_type(author.hymn_set.shout())  # revealed: str
 ```
 
+A member that the model declares, such as a field, a method, a manager or an annotation, keeps its
+type when a reverse accessor has the same name. Django's system checks reject a reverse accessor
+that clashes with a field, and one that replaces another member is a mistake:
+
+```py
+class Publisher(models.Model):
+    name = models.CharField(max_length=100)
+    catalogue = models.Manager()
+    reviews: int
+
+    def magazine_set(self) -> str:
+        return ""
+
+class Magazine(models.Model):
+    publisher = models.ForeignKey(Publisher, on_delete=models.CASCADE)
+    printer = models.ForeignKey(Publisher, on_delete=models.CASCADE, related_name="name")
+    reviewer = models.ForeignKey(Publisher, on_delete=models.CASCADE, related_name="reviews")
+    distributor = models.ForeignKey(Publisher, on_delete=models.CASCADE, related_name="catalogue")
+
+reveal_type(Publisher.catalogue)  # revealed: Manager[Publisher, QuerySet[Publisher, Publisher]]
+
+def _(publisher: Publisher):
+    reveal_type(publisher.name)  # revealed: str
+    reveal_type(publisher.reviews)  # revealed: int
+    reveal_type(publisher.magazine_set())  # revealed: str
+```
+
+A reverse accessor can be named `objects` on a model whose managers have other names. On a model
+without managers, the `objects` manager that Django adds keeps its name:
+
+```py
+class Rack(models.Model):
+    items = models.Manager()
+
+class Slot(models.Model):
+    rack = models.ForeignKey(Rack, on_delete=models.CASCADE, related_name="objects")
+
+class Crate(models.Model):
+    pass
+
+class Parcel(models.Model):
+    crate = models.ForeignKey(Crate, on_delete=models.CASCADE, related_name="objects")
+
+def _(rack: Rack):
+    reveal_type(rack.objects.get())  # revealed: Slot
+
+reveal_type(Crate.objects.get())  # revealed: Crate
+```
+
 ## Reverse accessors across modules
 
 A relation that is declared in another app also adds a reverse accessor. Django imports the `models`
@@ -1955,6 +2018,43 @@ def _():
     ).get()
     reveal_type(review.reviewed_book)  # revealed: Book
     reveal_type(review.review_editor)  # revealed: Author | None
+```
+
+The `queryset` of a `Prefetch` object can leave the related object out, which Django stores as
+`None`. The reverse accessor of a `OneToOneField`, and the link from a parent model to a child
+model, can also have no related object. The link from a child model to its parent always has one,
+and a many-to-many field leads to a list. We do not know what an unknown relation leads to:
+
+```py
+class Tag(models.Model):
+    pass
+
+class Volume(models.Model):
+    author = models.ForeignKey(Author, on_delete=models.CASCADE)
+    tags = models.ManyToManyField(Tag)
+
+class Jacket(models.Model):
+    volume = models.OneToOneField(Volume, on_delete=models.CASCADE)
+
+class Audiobook(Volume):
+    pass
+
+def _():
+    volume = Volume.objects.prefetch_related(
+        Prefetch("author", queryset=Author.objects.filter(name="Ann"), to_attr="filtered_author"),
+        Prefetch("jacket", to_attr="volume_jacket"),
+        Prefetch("audiobook", to_attr="volume_audiobook"),
+        Prefetch("tags", to_attr="tag_list"),
+        Prefetch("unknown", to_attr="mystery"),
+    ).get()
+    reveal_type(volume.filtered_author)  # revealed: Author | None
+    reveal_type(volume.volume_jacket)  # revealed: Jacket | None
+    reveal_type(volume.volume_audiobook)  # revealed: Audiobook | None
+    reveal_type(volume.tag_list)  # revealed: list[Tag]
+    reveal_type(volume.mystery)  # revealed: Any
+
+    audiobook = Audiobook.objects.prefetch_related(Prefetch("volume_ptr", to_attr="original")).get()
+    reveal_type(audiobook.original)  # revealed: Volume
 ```
 
 ## Field assignments
@@ -2576,6 +2676,48 @@ def _(book: Book):
     book.save(update_fields=["id"])  # error: [invalid-argument-type]
 ```
 
+That includes a field with `primary_key=True`, the ID attribute of a foreign key that is the primary
+key, the link to a concrete parent, and a primary key that the model inherits from an abstract or a
+concrete parent:
+
+```py
+class Edition(models.Model):
+    isbn = models.CharField(max_length=13, primary_key=True)
+    title = models.CharField(max_length=200)
+
+class Jacket(models.Model):
+    edition = models.OneToOneField(Edition, on_delete=models.CASCADE, primary_key=True)
+    color = models.CharField(max_length=10)
+
+class DigitalEdition(Edition):
+    size = models.IntegerField()
+
+class Coded(models.Model):
+    code = models.CharField(max_length=5, primary_key=True)
+
+    class Meta:
+        abstract = True
+
+class Product(Coded):
+    label = models.CharField(max_length=10)
+
+def _(edition: Edition, jacket: Jacket, digital: DigitalEdition, product: Product):
+    edition.save(update_fields=["title"])  # ok
+    edition.save(update_fields=["isbn"])  # error: [invalid-argument-type]
+
+    jacket.save(update_fields=["color"])  # ok
+    jacket.save(update_fields=["edition"])  # error: [invalid-argument-type]
+    jacket.save(update_fields=["edition_id"])  # error: [invalid-argument-type]
+
+    digital.save(update_fields=["title", "size"])  # ok
+    digital.save(update_fields=["edition_ptr"])  # error: [invalid-argument-type]
+    digital.save(update_fields=["edition_ptr_id"])  # error: [invalid-argument-type]
+    digital.save(update_fields=["isbn"])  # error: [invalid-argument-type]
+
+    product.save(update_fields=["label"])  # ok
+    product.save(update_fields=["code"])  # error: [invalid-argument-type]
+```
+
 `update()` takes the new field values as keywords, which are checked like the keywords of the
 constructor:
 
@@ -3015,6 +3157,24 @@ def _(book: Book, proxy: BookProxy):
     reveal_type(proxy.wishers.get())  # revealed: Reader
 ```
 
+This also holds for a relation to a proxy of a proxy model, and for a many-to-many field:
+
+```py
+class BookProxyProxy(BookProxy):
+    class Meta:
+        proxy = True
+
+class Collector(models.Model):
+    pick = models.ForeignKey(BookProxyProxy, on_delete=models.CASCADE, related_name="pickers")
+    shelf = models.ManyToManyField(BookProxy, related_name="shelvers")
+
+def _(book: Book, proxy: BookProxy, proxy_proxy: BookProxyProxy):
+    reveal_type(book.pickers.get())  # revealed: Collector
+    reveal_type(proxy_proxy.pickers.get())  # revealed: Collector
+    reveal_type(book.shelvers.get())  # revealed: Collector
+    reveal_type(proxy.shelvers.get())  # revealed: Collector
+```
+
 A concrete child of a proxy model links to the proxy's concrete parent.
 
 ```py
@@ -3137,6 +3297,18 @@ class BookProxy(Book):
 
 def _(book: Book):
     book.bookproxy  # error: [missing-attribute]
+```
+
+A relation to a child model adds the reverse accessor to the child, which has its own table, and not
+to the parent:
+
+```py
+class Buyer(models.Model):
+    ebook = models.ForeignKey(Ebook, on_delete=models.CASCADE, related_name="buyers")
+
+def _(book: Book, ebook: Ebook):
+    reveal_type(ebook.buyers.get())  # revealed: Buyer
+    book.buyers  # error: [missing-attribute]
 ```
 
 ## Choices attributes
@@ -3801,6 +3973,61 @@ class Member(AbstractUser):
 from django.contrib.auth import get_user_model
 
 reveal_type(get_user_model())  # revealed: type[Member]
+```
+
+### User model that depends on a condition
+
+Neither do we know the user model when the settings module sets `AUTH_USER_MODEL` to different
+models in different branches:
+
+`manage.py`:
+
+```py
+import os
+
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "mysite.settings")
+```
+
+`mysite/__init__.py`:
+
+```py
+```
+
+`mysite/settings.py`:
+
+```py
+import os
+
+INSTALLED_APPS = ["django.contrib.auth", "django.contrib.contenttypes", "accounts"]
+if os.environ.get("STAFF_SITE") is not None:
+    AUTH_USER_MODEL = "accounts.Staff"
+else:
+    AUTH_USER_MODEL = "accounts.Member"
+```
+
+`accounts/__init__.py`:
+
+```py
+```
+
+`accounts/models.py`:
+
+```py
+from django.contrib.auth.models import AbstractUser
+
+class Member(AbstractUser):
+    pass
+
+class Staff(AbstractUser):
+    pass
+```
+
+`views.py`:
+
+```py
+from django.contrib.auth import get_user_model
+
+reveal_type(get_user_model())  # revealed: type[AbstractUser]
 ```
 
 ### User model in settings that we cannot fully see
