@@ -2,16 +2,18 @@
 
 use ruff_db::parsed::parsed_module;
 use ruff_python_ast::{self as ast, name::Name};
+use ty_module_resolver::{KnownModule, file_to_module};
 use ty_python_core::{
     definition::{Definition, DefinitionKind},
     place_table, semantic_index, use_def_map,
 };
 
 use crate::place::place_from_bindings;
+use crate::types::call::Binding;
 use crate::types::infer::nearest_enclosing_class;
 use crate::types::member::class_member;
 use crate::types::{
-    ClassBase, KnownClass, Specialization, StaticClassLiteral, Type, binding_type,
+    ClassBase, KnownClass, Specialization, StaticClassLiteral, Type, UnionType, binding_type,
     definition_expression_type,
 };
 use crate::{Db, ProgramEnvironment};
@@ -438,6 +440,71 @@ pub(super) fn specialized_field_type<'db>(
             generic_context.specialize(db, vec![write, read])
         }),
     ))
+}
+
+/// Add `None` to the write and read types of `instance`, a Django field that a constructor call
+/// with the matching overloads `overloads` creates, if the call passes `null=True`.
+///
+/// django-stubs gives `BooleanField(null=True)` the type `BooleanField[bool | None, bool | None]`
+/// through the `self` annotation of an `__init__` overload. A declared type is the type context
+/// of the call and can select the non-nullable types instead, and so can explicit type arguments:
+/// ```py
+/// class Settings(models.Model):
+///     enabled: models.BooleanField = models.BooleanField(null=True)
+///     confirmed: models.BooleanField = models.BooleanField[bool, bool](null=True)
+/// ```
+/// A `NULL` column reads as `None` whatever the call says, so `null=True` decides the types, as
+/// in the django-stubs mypy plugin. Both assignments above then report `invalid-assignment`.
+///
+/// Only the fields defined in `django.db.models.fields` and Django's foreign keys use their two
+/// type arguments for the values that `null=True` makes nullable. A `FileField`, for example,
+/// still reads as a `FieldFile` for a `NULL` column, and a project's field class declares its
+/// own type arguments.
+pub(in crate::types) fn nullable_field_type<'db, 'a>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+    instance: Type<'db>,
+    overloads: impl IntoIterator<Item = &'a Binding<'db>>,
+) -> Type<'db>
+where
+    'db: 'a,
+{
+    let Some((class, specialization)) = instance.class_specialization(db, env) else {
+        return instance;
+    };
+    let &[write, read] = specialization.types(db) else {
+        return instance;
+    };
+    let is_nullable_field =
+        file_to_module(db, class.program_file(db).resolver_file(db)).is_some_and(|module| {
+            module.is_known(db, KnownModule::DjangoDbModelsFields)
+                || (module.name(db).first_component() == "django" && is_foreign_key(db, class))
+        }) && overloads.into_iter().any(|overload| {
+            overload
+                .parameter_type_by_name(db, "null", false)
+                .ok()
+                .flatten()
+                .and_then(Type::as_bool_literal)
+                == Some(true)
+        });
+    if !is_nullable_field {
+        return instance;
+    }
+    let none = Type::none(db, env);
+    let types: Box<[Type<'db>]> = Box::new([
+        UnionType::from_two_elements(db, env, write, none),
+        UnionType::from_two_elements(db, env, read, none),
+    ]);
+    // Keep the materialization kind of the specialization. A specialization only has tuple
+    // element types for `tuple`, which is not a field class.
+    let nullable = Specialization::new(
+        db,
+        specialization.generic_context(db),
+        types,
+        specialization.materialization_kind(db),
+        None,
+    );
+    Type::instance(db, env, class.apply_specialization(db, |_| nullable))
 }
 
 /// Return the type of a field `ty` whose class converts its values, and declares their types only
