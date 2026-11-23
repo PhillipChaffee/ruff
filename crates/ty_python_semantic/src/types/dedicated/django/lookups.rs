@@ -279,6 +279,14 @@ impl<'db> QueryContext<'db> {
             annotations: Box::default(),
         }
     }
+
+    /// This query, with the names `names` added to its annotations.
+    fn with_annotations(&self, names: impl IntoIterator<Item = Name>) -> Self {
+        Self {
+            model: self.model,
+            annotations: self.annotations.iter().cloned().chain(names).collect(),
+        }
+    }
 }
 
 /// Return the query of the Django manager or queryset `receiver`, if we see every name that the
@@ -457,6 +465,8 @@ pub(super) enum FieldNamesMethod {
     OnlyOrDefer,
     /// `select_related("author")`, which only takes relations to a single row.
     SelectRelated,
+    /// `values("title", "author__name")` or `values_list("title")`
+    Values,
 }
 
 impl FieldNamesMethod {
@@ -465,6 +475,7 @@ impl FieldNamesMethod {
             "order_by" => Some(Self::OrderBy),
             "only" | "defer" => Some(Self::OnlyOrDefer),
             "select_related" => Some(Self::SelectRelated),
+            "values" | "values_list" => Some(Self::Values),
             _ => None,
         }
     }
@@ -475,12 +486,14 @@ impl FieldNamesMethod {
             // `?` orders randomly, and a name with a `.` names a database column.
             Self::OrderBy if path == "?" || path.contains('.') => return None,
             Self::OrderBy => path.strip_prefix('-').unwrap_or(path),
-            Self::OnlyOrDefer | Self::SelectRelated => path,
+            Self::OnlyOrDefer | Self::SelectRelated | Self::Values => path,
         };
         let resolved = resolve_path(db, query, path);
         if let Some(PathError::UnknownName { model, name }) = resolved.error {
             return Some(match self {
-                Self::OrderBy => format!("Cannot resolve keyword '{name}' into field"),
+                Self::OrderBy | Self::Values => {
+                    format!("Cannot resolve keyword '{name}' into field")
+                }
                 Self::OnlyOrDefer => format!("{} has no field named '{name}'", model.name(db)),
                 Self::SelectRelated => {
                     format!("Invalid field name(s) given in select_related: '{name}'")
@@ -529,6 +542,28 @@ pub(super) fn report_field_names<'db>(
     query: &QueryContext<'db>,
     arguments: &ast::Arguments,
 ) {
+    // `values()` annotates the query with its keyword arguments before it resolves the field
+    // names, so a field name can also name one of them:
+    // ```py
+    // Book.objects.values("title_length", title_length=Length("title"))
+    // ```
+    // `values_list()` only takes `flat` and `named` as keywords. Treating them as annotations too
+    // only means that we accept the field names `flat` and `named` in such a call.
+    let query_with_expressions;
+    let query = if method == FieldNamesMethod::Values && !arguments.keywords.is_empty() {
+        let mut names = Vec::with_capacity(arguments.keywords.len());
+        for keyword in &arguments.keywords {
+            // `values(**expressions)` adds names that we do not see.
+            let Some(arg) = &keyword.arg else {
+                return;
+            };
+            names.push(arg.id.clone());
+        }
+        query_with_expressions = query.with_annotations(names);
+        &query_with_expressions
+    } else {
+        query
+    };
     for argument in &arguments.args {
         if let Some(literal) = argument.as_string_literal_expr()
             && let Some(message) = method.error(context.db(), query, literal.value.to_str())

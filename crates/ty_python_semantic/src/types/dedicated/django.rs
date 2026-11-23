@@ -243,8 +243,9 @@ fn is_django_function<'db>(db: &'db dyn Db, function: FunctionType<'db>) -> bool
 
 /// Report the arguments of a call to a Django method that Django rejects at runtime, although the
 /// stubs accept their types: the arguments of `values_list()`, and the field names that
-/// `order_by()`, `only()`, `defer()`, `select_related()` and `save(update_fields=...)` cannot
-/// resolve. `bindings` is the result of binding the arguments of `call_expression`.
+/// `order_by()`, `only()`, `defer()`, `select_related()`, `values()`, `values_list()` and
+/// `save(update_fields=...)` cannot resolve. `bindings` is the result of binding the arguments of
+/// `call_expression`.
 ///
 /// This only checks calls of the methods that Django declares.
 pub(in crate::types) fn report_queryset_call<'db>(
@@ -270,15 +271,15 @@ pub(in crate::types) fn report_queryset_call<'db>(
             continue;
         }
         let receiver = bound_method.self_instance(db);
+        if name == "values_list"
+            && is_queryset_or_manager(db, env, receiver)
+            && let Some((_, overload)) = binding.matching_overloads().next()
+        {
+            report_values_list_arguments(context, arguments, overload);
+        }
         if let Some(method) = field_names_method {
             if let Some(query) = query_context(db, env, receiver) {
                 report_field_names(context, method, &query, arguments);
-            }
-        } else if name == "values_list" {
-            if is_queryset_or_manager(db, env, receiver)
-                && let Some((_, overload)) = binding.matching_overloads().next()
-            {
-                report_values_list_arguments(context, arguments, overload);
             }
         } else if let Type::NominalInstance(instance) = receiver
             && let Some((model, _)) = instance.class(db, env).static_class_literal(db)
