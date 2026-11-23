@@ -534,8 +534,9 @@ impl FieldNamesMethod {
     /// Return the error that Django raises for the field name `path` in the query `query`, if any.
     fn error<'db>(self, db: &'db dyn Db, query: &QueryContext<'db>, path: &str) -> Option<String> {
         let path = match self {
-            // `?` orders randomly, and a name with a `.` names a database column.
-            Self::OrderBy if path == "?" || path.contains('.') => return None,
+            // `?` orders randomly. Django no longer accepts a column name qualified with its
+            // table, such as `library_book.title`; it looks the whole name up as a field.
+            Self::OrderBy if path == "?" => return None,
             Self::OrderBy => path.strip_prefix('-').unwrap_or(path),
             Self::OnlyOrDefer | Self::SelectRelated | Self::Values | Self::ValuesList => path,
         };
