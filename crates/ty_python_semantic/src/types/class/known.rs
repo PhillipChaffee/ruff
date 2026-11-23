@@ -173,6 +173,7 @@ pub enum KnownClass {
     DjangoBaseManager,
     DjangoQuerySet,
     DjangoBaseForm,
+    DrfBaseSerializer,
     DjangoApps,
     DjangoAggregate,
     // Pydantic
@@ -312,6 +313,7 @@ impl KnownClass {
             | Self::DjangoBaseManager
             | Self::DjangoQuerySet
             | Self::DjangoBaseForm
+            | Self::DrfBaseSerializer
             | Self::DjangoApps
             | Self::DjangoAggregate
             | Self::PydanticBaseModel
@@ -462,6 +464,7 @@ impl KnownClass {
             | Self::DjangoBaseManager
             | Self::DjangoQuerySet
             | Self::DjangoBaseForm
+            | Self::DrfBaseSerializer
             | Self::DjangoApps
             | Self::DjangoAggregate
             | Self::PydanticBaseModel
@@ -602,6 +605,7 @@ impl KnownClass {
             | KnownClass::DjangoBaseManager
             | KnownClass::DjangoQuerySet
             | KnownClass::DjangoBaseForm
+            | KnownClass::DrfBaseSerializer
             | KnownClass::DjangoApps
             | KnownClass::DjangoAggregate
             | KnownClass::PydanticBaseModel
@@ -734,6 +738,7 @@ impl KnownClass {
             | KnownClass::DjangoBaseManager
             | KnownClass::DjangoQuerySet
             | KnownClass::DjangoBaseForm
+            | KnownClass::DrfBaseSerializer
             | KnownClass::DjangoApps
             | KnownClass::DjangoAggregate
             | KnownClass::PydanticBaseModel
@@ -865,6 +870,7 @@ impl KnownClass {
             | KnownClass::DjangoBaseManager
             | KnownClass::DjangoQuerySet
             | KnownClass::DjangoBaseForm
+            | KnownClass::DrfBaseSerializer
             | KnownClass::DjangoApps
             | KnownClass::DjangoAggregate
             | KnownClass::PydanticBaseModel
@@ -1009,6 +1015,7 @@ impl KnownClass {
             | Self::DjangoBaseManager
             | Self::DjangoQuerySet
             | Self::DjangoBaseForm
+            | Self::DrfBaseSerializer
             | Self::DjangoApps
             | Self::DjangoAggregate
             | Self::PydanticBaseModel
@@ -1142,6 +1149,7 @@ impl KnownClass {
             | KnownClass::DjangoBaseManager
             | KnownClass::DjangoQuerySet
             | KnownClass::DjangoBaseForm
+            | KnownClass::DrfBaseSerializer
             | KnownClass::DjangoApps
             | KnownClass::DjangoAggregate
             | KnownClass::PydanticBaseModel
@@ -1287,6 +1295,7 @@ impl KnownClass {
             Self::DjangoBaseManager => "BaseManager",
             Self::DjangoQuerySet => "QuerySet",
             Self::DjangoBaseForm => "BaseForm",
+            Self::DrfBaseSerializer => "BaseSerializer",
             Self::DjangoApps => "Apps",
             Self::DjangoAggregate => "Aggregate",
             Self::PydanticBaseModel => "BaseModel",
@@ -1736,6 +1745,7 @@ impl KnownClass {
             Self::DjangoBaseManager => KnownModule::DjangoDbModelsManager,
             Self::DjangoQuerySet => KnownModule::DjangoDbModelsQuery,
             Self::DjangoBaseForm => KnownModule::DjangoFormsForms,
+            Self::DrfBaseSerializer => KnownModule::RestFrameworkSerializers,
             Self::DjangoApps => KnownModule::DjangoAppsRegistry,
             Self::DjangoAggregate => KnownModule::DjangoDbModelsAggregates,
             Self::PydanticBaseModel => KnownModule::PydanticMain,
@@ -1872,6 +1882,7 @@ impl KnownClass {
             | Self::DjangoBaseManager
             | Self::DjangoQuerySet
             | Self::DjangoBaseForm
+            | Self::DrfBaseSerializer
             | Self::DjangoApps
             | Self::DjangoAggregate
             | Self::PydanticBaseModel
@@ -1988,6 +1999,7 @@ impl KnownClass {
             "BaseManager" => &[Self::DjangoBaseManager],
             "QuerySet" => &[Self::DjangoQuerySet],
             "BaseForm" => &[Self::DjangoBaseForm],
+            "BaseSerializer" => &[Self::DrfBaseSerializer],
             "Apps" => &[Self::DjangoApps],
             "Aggregate" => &[Self::DjangoAggregate],
             "KW_ONLY" => &[Self::KwOnly],
@@ -2126,6 +2138,7 @@ impl KnownClass {
             | Self::DjangoBaseManager
             | Self::DjangoQuerySet
             | Self::DjangoBaseForm
+            | Self::DrfBaseSerializer
             | Self::DjangoApps
             | Self::DjangoAggregate
             | Self::PydanticBaseModel
