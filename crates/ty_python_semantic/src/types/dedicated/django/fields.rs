@@ -17,7 +17,7 @@ use crate::types::{
 use crate::{Db, ProgramEnvironment};
 
 use super::relations::{is_foreign_key, refined_field_type};
-use super::{inherits_from, is_django_class, is_model};
+use super::{inherits_from, is_django_file, is_model};
 
 /// The type of a Django model field, and metadata extracted from the field construction.
 ///
@@ -477,7 +477,7 @@ pub(super) fn converted_field_type<'db>(
         .filter_map(ClassBase::into_class)
         .filter_map(|base| base.static_class_literal(db))
         .map(|(base, _)| base)
-        .filter(|base| !is_django_class(db, *base))
+        .filter(|base| !is_django_file(db, base.program_file(db)))
         .collect();
     let declares_value_types = own_classes.iter().any(|class| {
         class.explicit_bases(db).iter().any(|base| {

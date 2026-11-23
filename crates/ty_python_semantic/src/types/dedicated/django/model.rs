@@ -19,7 +19,7 @@ use crate::{Db, ProgramEnvironment};
 use super::fields::{Field, model_field_type, model_metadata, own_model_fields};
 use super::project::project_models;
 use super::relations::{is_foreign_key, refined_field_type, related_model};
-use super::{inherits_from, is_django_class, is_model};
+use super::{inherits_from, is_django_file, is_model};
 
 /// Synthesize the `__init__` method of a model, with one keyword parameter per name that Django's
 /// `Model.__init__` accepts.
@@ -725,6 +725,6 @@ pub(super) fn contributed_attribute_type<'db>(
         .iter_mro(db)
         .filter_map(ClassBase::into_class)
         .filter_map(|base| base.static_class_literal(db))
-        .any(|(base, _)| is_django_class(db, base));
+        .any(|(base, _)| is_django_file(db, base.program_file(db)));
     (!comes_from_django).then(Type::any)
 }
