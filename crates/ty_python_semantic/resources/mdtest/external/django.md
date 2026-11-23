@@ -236,6 +236,33 @@ def _(book: Book):
     reveal_type(book.pages)  # revealed: int | None
 ```
 
+The automatic fields, such as `AutoField`, take their arguments through `*args, **kwargs` in the
+stubs, and `null=True` makes them nullable as well. Django's system checks reject such a field
+unless it is the primary key (`fields.E100`), and reject a nullable primary key (`fields.E007`)
+except on a backend that stores empty strings as `NULL`, such as Oracle:
+
+```py
+reveal_type(models.AutoField(primary_key=True, null=True))  # revealed: AutoField[int | str | None, int | None]
+```
+
+The value of such a field on a model can be `None`:
+
+```py
+class Ticket(models.Model):
+    number = models.BigAutoField(primary_key=True, null=True)
+
+def _(ticket: Ticket):
+    reveal_type(ticket.number)  # revealed: int | None
+```
+
+As for the other fields, only a literal `True` makes an automatic field nullable:
+
+```py
+def _(flag: bool):
+    reveal_type(models.AutoField(primary_key=True, null=False))  # revealed: AutoField[int | str, int]
+    reveal_type(models.AutoField(primary_key=True, null=flag))  # revealed: AutoField[int | str, int]
+```
+
 ## Annotated fields
 
 The arguments of a field determine its value types, also when the field has an annotation.

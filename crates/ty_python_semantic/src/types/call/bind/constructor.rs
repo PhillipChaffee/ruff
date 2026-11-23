@@ -57,6 +57,9 @@ pub(super) struct ConstructorBinding<'db> {
     /// The next downstream constructor method, if any, to be (conditionally) checked after this
     /// one.
     pub(super) downstream_constructor: Option<Box<Bindings<'db>>>,
+    /// A return type that replaces the one that [`Self::return_type`] computes from the bindings,
+    /// set by a special case for a known class after the call has been checked.
+    return_type_override: Option<Type<'db>>,
 }
 
 impl<'db> ConstructorBinding<'db> {
@@ -68,6 +71,7 @@ impl<'db> ConstructorBinding<'db> {
             entry,
             constructor_context,
             downstream_constructor: None,
+            return_type_override: None,
         }
     }
 
@@ -89,6 +93,12 @@ impl<'db> ConstructorBinding<'db> {
 
     pub(super) fn set_constructed_instance_type(&mut self, instance_type: Type<'db>) {
         self.constructor_context = self.constructor_context.with_instance_type(instance_type);
+    }
+
+    /// Replace the return type of this constructor call, as [`Binding::set_return_type`] does for
+    /// one overload. `None` restores the return type that the bindings determine.
+    pub(super) fn set_return_type_override(&mut self, return_type: Option<Type<'db>>) {
+        self.return_type_override = return_type;
     }
 
     pub(super) fn set_downstream_constructor(&mut self, bindings: Bindings<'db>) {
@@ -229,6 +239,8 @@ impl<'db> ConstructorBinding<'db> {
         call_expression_tcx: TypeContext<'db>,
         mode: CheckTypesMode,
     ) {
+        // An override describes the result of an earlier check.
+        self.return_type_override = None;
         self.entry.check_types(
             db,
             env,
@@ -332,11 +344,15 @@ impl<'db> ConstructorBinding<'db> {
             entry: f(self.entry),
             constructor_context: self.constructor_context,
             downstream_constructor: None,
+            return_type_override: None,
         }
     }
 
     /// Compute the overall effective return type of this `ConstructorBinding`.
     pub(super) fn return_type(&self, db: &'db dyn Db, env: &ProgramEnvironment<'db>) -> Type<'db> {
+        if let Some(return_type) = self.return_type_override {
+            return return_type;
+        }
         let constructed_instance_type = self.constructed_instance_type();
 
         // If we are checking downstream constructors, and the downstream constructor resolves to a
@@ -365,14 +381,8 @@ impl<'db> ConstructorBinding<'db> {
             return return_ty;
         }
 
-        let instance = constructed_instance_type
-            .apply_optional_specialization(db, self.instance_return_specialization(db, env, None));
-        // A Django field's `null=True` argument decides whether its values include `None`,
-        // whatever the type context or explicit type arguments of the call say. This runs on the
-        // final specialization, after defaults have filled unsolved type variables; the foreign
-        // key hook in `instance_return_specialization` fills only unsolved slots, so it runs
-        // earlier. For a nullable foreign key both add `None`, which the union deduplicates.
-        django::nullable_field_type(db, env, instance, self.matching_overloads_with_downstream())
+        constructed_instance_type
+            .apply_optional_specialization(db, self.instance_return_specialization(db, env, None))
     }
 
     fn first_matching_overload(&self) -> Option<&Binding<'db>> {
@@ -384,7 +394,7 @@ impl<'db> ConstructorBinding<'db> {
 
     /// The first matching overload of this constructor method and of each constructor method
     /// directly downstream of it.
-    fn matching_overloads_with_downstream(&self) -> impl Iterator<Item = &Binding<'db>> {
+    pub(super) fn matching_overloads_with_downstream(&self) -> impl Iterator<Item = &Binding<'db>> {
         self.first_matching_overload().into_iter().chain(
             self.downstream_constructor()
                 .into_iter()
@@ -524,7 +534,7 @@ impl<'db> ConstructorBinding<'db> {
                 return;
             };
             // A Django foreign key's `to` argument fills the slots that inference left unsolved.
-            // `null=True` is applied to the final type in `return_type`, see
+            // `null=True` is applied to the final return type once the call has been checked, see
             // `django::nullable_field_type`.
             if let [write, read] = types.as_mut_slice()
                 && (write.is_none() || read.is_none())

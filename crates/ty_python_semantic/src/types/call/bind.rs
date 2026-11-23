@@ -1450,6 +1450,8 @@ impl<'db> Bindings<'db> {
             );
         }
 
+        self.override_constructor_return_types(db, env, call_arguments);
+
         // For intersection elements with at least one successful binding,
         // filter out the failing bindings after deferred constructor checks.
         for element in &mut self.elements {
@@ -1457,6 +1459,39 @@ impl<'db> Bindings<'db> {
         }
 
         self.as_result(db)
+    }
+
+    /// Replace the return types of constructor calls that a special case for a known class
+    /// determines from the call's arguments.
+    ///
+    /// This runs once the constructor and its downstream constructors have been checked, because
+    /// the return type depends on all of their bindings.
+    fn override_constructor_return_types(
+        &mut self,
+        db: &'db dyn Db,
+        env: &ProgramEnvironment<'db>,
+        call_arguments: &CallArguments<'_, 'db>,
+    ) {
+        for constructor in self.iter_constructor_items_mut() {
+            constructor.set_return_type_override(None);
+            // Computing the return type merges the specializations of all bindings, so first rule
+            // out the classes that no special case applies to.
+            if !django::is_nullable_field_instance(db, env, constructor.constructed_instance_type())
+            {
+                continue;
+            }
+            // A Django field's `null=True` argument decides whether its values include `None`,
+            // whatever the type context or explicit type arguments of the call say. This runs on
+            // the final specialization, after defaults have filled unsolved type variables.
+            let return_type = django::nullable_field_type(
+                db,
+                env,
+                constructor.return_type(db, env),
+                constructor.matching_overloads_with_downstream(),
+                call_arguments,
+            );
+            constructor.set_return_type_override(return_type);
+        }
     }
 
     /// Finalize the bindings after a provisional check, retaining only those that contribute
@@ -1482,6 +1517,8 @@ impl<'db> Bindings<'db> {
                 );
             }
         }
+
+        self.override_constructor_return_types(db, env, call_arguments);
 
         for element in &mut self.elements {
             element.retain_successful(db);

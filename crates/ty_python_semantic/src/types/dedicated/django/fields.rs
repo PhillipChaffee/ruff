@@ -9,7 +9,7 @@ use ty_python_core::{
 };
 
 use crate::place::place_from_bindings;
-use crate::types::call::Binding;
+use crate::types::call::{Argument, Binding, CallArguments};
 use crate::types::infer::nearest_enclosing_class;
 use crate::types::member::class_member;
 use crate::types::{
@@ -443,7 +443,8 @@ pub(super) fn specialized_field_type<'db>(
 }
 
 /// Add `None` to the write and read types of `instance`, a Django field that a constructor call
-/// with the matching overloads `overloads` creates, if the call passes `null=True`.
+/// with the matching overloads `overloads` and the arguments `arguments` creates, if the call
+/// passes `null=True`. Returns `None` if the call creates no such field.
 ///
 /// django-stubs gives `BooleanField(null=True)` the type `BooleanField[bool | None, bool | None]`
 /// through the `self` annotation of an `__init__` overload. A declared type is the type context
@@ -456,6 +457,15 @@ pub(super) fn specialized_field_type<'db>(
 /// A `NULL` column reads as `None` whatever the call says, so `null=True` decides the types, as
 /// in the django-stubs mypy plugin. Both assignments above then report `invalid-assignment`.
 ///
+/// The type of the `null` parameter of a matching overload decides. The call's `null` keyword
+/// argument is not enough on its own: it is inferred against the `null` parameter of each
+/// overload, and when those inferences differ it has no single type. The automatic fields,
+/// such as `AutoField`, take `null` through the `**kwargs` of `AutoFieldMixin.__init__`, which has
+/// no `null` parameter, so for an overload that takes `**kwargs` the keyword argument decides:
+/// ```py
+/// models.AutoField(primary_key=True, null=True)  # AutoField[int | str | None, int | None]
+/// ```
+///
 /// Only the fields defined in `django.db.models.fields` and Django's foreign keys use their two
 /// type arguments for the values that `null=True` makes nullable. A `FileField`, for example,
 /// still reads as a `FieldFile` for a `NULL` column, and a project's field class declares its
@@ -465,30 +475,37 @@ pub(in crate::types) fn nullable_field_type<'db, 'a>(
     env: &ProgramEnvironment<'db>,
     instance: Type<'db>,
     overloads: impl IntoIterator<Item = &'a Binding<'db>>,
-) -> Type<'db>
+    arguments: &CallArguments<'_, 'db>,
+) -> Option<Type<'db>>
 where
     'db: 'a,
 {
-    let Some((class, specialization)) = instance.class_specialization(db, env) else {
-        return instance;
-    };
+    let (class, specialization) = instance.class_specialization(db, env)?;
     let &[write, read] = specialization.types(db) else {
-        return instance;
+        return None;
     };
-    let is_nullable_field =
-        file_to_module(db, class.program_file(db).resolver_file(db)).is_some_and(|module| {
-            module.is_known(db, KnownModule::DjangoDbModelsFields)
-                || (module.name(db).first_component() == "django" && is_foreign_key(db, class))
-        }) && overloads.into_iter().any(|overload| {
-            overload
-                .parameter_type_by_name(db, "null", false)
-                .ok()
-                .flatten()
-                .and_then(Type::as_bool_literal)
-                == Some(true)
+    let null_argument = || {
+        arguments
+            .iter()
+            .find_map(|argument| match argument.kind() {
+                Argument::Keyword("null") => Some(argument.source_type()),
+                _ => None,
+            })
+            .flatten()
+    };
+    let is_nullable_field = is_nullable_field_class(db, class)
+        && overloads.into_iter().any(|overload| {
+            let null = match overload.parameter_type_by_name(db, "null", false) {
+                Ok(null) => null,
+                Err(_) if overload.signature.parameters().keyword_variadic().is_some() => {
+                    null_argument()
+                }
+                Err(_) => None,
+            };
+            null.and_then(Type::as_bool_literal) == Some(true)
         });
     if !is_nullable_field {
-        return instance;
+        return None;
     }
     let none = Type::none(db, env);
     let types: Box<[Type<'db>]> = Box::new([
@@ -504,7 +521,35 @@ where
         specialization.materialization_kind(db),
         None,
     );
-    Type::instance(db, env, class.apply_specialization(db, |_| nullable))
+    Some(Type::instance(
+        db,
+        env,
+        class.apply_specialization(db, |_| nullable),
+    ))
+}
+
+/// Whether `instance` is an instance of a field class whose values [`nullable_field_type`] can
+/// make nullable. This is a cheap check that a constructor call can make before it computes its
+/// return type for [`nullable_field_type`].
+pub(in crate::types) fn is_nullable_field_instance<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+    instance: Type<'db>,
+) -> bool {
+    instance
+        .nominal_class(db, env)
+        .and_then(|class| class.static_class_literal(db))
+        .is_some_and(|(class, _)| is_nullable_field_class(db, class))
+}
+
+/// Whether `class` is one of the fields defined in `django.db.models.fields` or one of Django's
+/// foreign keys, which use their two type arguments for the values that `null=True` makes
+/// nullable.
+fn is_nullable_field_class<'db>(db: &'db dyn Db, class: StaticClassLiteral<'db>) -> bool {
+    file_to_module(db, class.program_file(db).resolver_file(db)).is_some_and(|module| {
+        module.is_known(db, KnownModule::DjangoDbModelsFields)
+            || (module.name(db).first_component() == "django" && is_foreign_key(db, class))
+    })
 }
 
 /// Return the type of a field `ty` whose class converts its values, and declares their types only
