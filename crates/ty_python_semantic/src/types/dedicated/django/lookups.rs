@@ -493,8 +493,10 @@ pub(super) enum FieldNamesMethod {
     OnlyOrDefer,
     /// `select_related("author")`, which only takes relations to a single row.
     SelectRelated,
-    /// `values("title", "author__name")` or `values_list("title")`
+    /// `values("title", "author__name")`, whose keyword arguments add expressions to the query.
     Values,
+    /// `values_list("title", flat=True)`, whose keyword arguments are options.
+    ValuesList,
 }
 
 impl FieldNamesMethod {
@@ -503,7 +505,8 @@ impl FieldNamesMethod {
             "order_by" => Some(Self::OrderBy),
             "only" | "defer" => Some(Self::OnlyOrDefer),
             "select_related" => Some(Self::SelectRelated),
-            "values" | "values_list" => Some(Self::Values),
+            "values" => Some(Self::Values),
+            "values_list" => Some(Self::ValuesList),
             _ => None,
         }
     }
@@ -514,12 +517,12 @@ impl FieldNamesMethod {
             // `?` orders randomly, and a name with a `.` names a database column.
             Self::OrderBy if path == "?" || path.contains('.') => return None,
             Self::OrderBy => path.strip_prefix('-').unwrap_or(path),
-            Self::OnlyOrDefer | Self::SelectRelated | Self::Values => path,
+            Self::OnlyOrDefer | Self::SelectRelated | Self::Values | Self::ValuesList => path,
         };
         let resolved = resolve_path(db, query, path);
         if let Some(PathError::UnknownName { model, name }) = resolved.error {
             return Some(match self {
-                Self::OrderBy | Self::Values => {
+                Self::OrderBy | Self::Values | Self::ValuesList => {
                     format!("Cannot resolve keyword '{name}' into field")
                 }
                 Self::OnlyOrDefer => format!("{} has no field named '{name}'", model.name(db)),
@@ -604,8 +607,7 @@ pub(super) fn report_field_names<'db>(
     // ```py
     // Book.objects.values("title_length", title_length=Length("title"))
     // ```
-    // `values_list()` only takes `flat` and `named` as keywords. Treating them as annotations too
-    // only means that we accept the field names `flat` and `named` in such a call.
+    // The keyword arguments of `values_list()`, `flat` and `named`, are options and add no names.
     let query_with_expressions;
     let query = if method == FieldNamesMethod::Values && !arguments.keywords.is_empty() {
         let mut names = Vec::with_capacity(arguments.keywords.len());
