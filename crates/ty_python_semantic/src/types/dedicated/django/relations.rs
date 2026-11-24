@@ -165,7 +165,24 @@ fn declares_member<'db>(db: &'db dyn Db, class: StaticClassLiteral<'db>, name: &
 /// Book.objects.filter(wishers__id=1)
 /// BookProxy.objects.filter(wishers__id=1)
 /// ```
-#[salsa::tracked(returns(ref), cycle_initial=|_, _, _| IncomingRelations::default(), heap_size=ruff_memory_usage::heap_size)]
+///
+/// The relations to a model can depend on themselves, when a relation field reads a reverse
+/// accessor of the model that it refers to:
+/// ```py
+/// class Book(models.Model):
+///     author = models.ForeignKey(
+///         Author, on_delete=models.CASCADE, related_name=name_for(Author.book_set)
+///     )
+/// ```
+/// To find the relations to `Author`, we read the fields of `Book`. The related name of `author`
+/// reads `Author.book_set`, which comes from the relations to `Author`. The cycle starts from a
+/// model without relations.
+#[salsa::tracked(
+    returns(ref),
+    cycle_initial=|_, _, _| IncomingRelations::default(),
+    cycle_fn=incoming_relations_cycle_fn,
+    heap_size=ruff_memory_usage::heap_size
+)]
 pub(super) fn incoming_relations<'db>(
     db: &'db dyn Db,
     class: StaticClassLiteral<'db>,
@@ -343,6 +360,45 @@ pub(super) fn incoming_relations<'db>(
     IncomingRelations {
         relations: relations.into_boxed_slice(),
         is_complete,
+    }
+}
+
+/// Keep the relations of earlier iterations of a cycle.
+///
+/// With the `Book` of [`incoming_relations`], suppose that `name_for` returns the literal `"others"`
+/// for a reverse accessor. While `Author` has the reverse accessor `book_set`, the relation from
+/// `Book` has the related name `"others"`, so `Author` no longer has `book_set`. Then the relation
+/// has no related name, and `Author` has `book_set` again. The relations would change on every
+/// iteration. Once the cycle has had a few iterations to settle, a relation stays in the list, so
+/// the iteration reaches a fixed point. The relations of earlier iterations come first, so the
+/// order only changes when a new relation is found.
+///
+/// The list keeps every distinct relation that an iteration found, so in such a cycle one name can
+/// belong to two reverse accessors or query names, and a lookup of the name finds the earlier one.
+///
+/// The relations are complete only if they were complete in both iterations. An iteration is
+/// incomplete when it finds a relation that we cannot resolve, or whose query name we do not know,
+/// and the merged list also stands for that iteration. The flag can then only change once, from
+/// complete to incomplete, so it does not prevent a fixed point.
+fn incoming_relations_cycle_fn<'db>(
+    _db: &'db dyn Db,
+    cycle: &salsa::Cycle,
+    previous: &IncomingRelations<'db>,
+    current: IncomingRelations<'db>,
+    _class: StaticClassLiteral<'db>,
+) -> IncomingRelations<'db> {
+    if cycle.iteration() <= crate::TAINTED_CYCLES {
+        return current;
+    }
+    let mut relations = previous.relations.to_vec();
+    for relation in current.relations {
+        if !relations.contains(&relation) {
+            relations.push(relation);
+        }
+    }
+    IncomingRelations {
+        relations: relations.into_boxed_slice(),
+        is_complete: previous.is_complete && current.is_complete,
     }
 }
 
