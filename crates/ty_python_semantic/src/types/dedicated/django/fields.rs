@@ -280,7 +280,28 @@ pub(super) struct ModelMetadata {
     pub(super) is_proxy: bool,
 }
 
-#[salsa::tracked(returns(copy), heap_size=ruff_memory_usage::heap_size)]
+/// The metadata of a model, from its `Meta` class.
+///
+/// The metadata can depend on itself, when the `Meta` class reads an attribute that another model
+/// does not declare:
+/// ```py
+/// class Book(models.Model):
+///     author = models.ForeignKey(Author, on_delete=models.CASCADE)
+///
+///     class Meta:
+///         abstract = Author.MISSING
+/// ```
+/// To look up `Author.MISSING`, we try the reverse accessors of `Author`. Only a model that is not
+/// abstract has relations, so they read the metadata of `Book` again. The cycle starts from the
+/// options that Django uses when `Meta` does not set them: a model that is neither abstract nor a
+/// proxy. Such a model keeps its table, its relations and its managers, so we do not report the
+/// members that they add while the cycle settles.
+#[salsa::tracked(
+    returns(copy),
+    cycle_initial=|_, _, _| ModelMetadata::default(),
+    cycle_fn=model_metadata_cycle_fn,
+    heap_size=ruff_memory_usage::heap_size
+)]
 pub(super) fn model_metadata<'db>(
     db: &'db dyn Db,
     class: StaticClassLiteral<'db>,
@@ -299,6 +320,32 @@ pub(super) fn model_metadata<'db>(
             .map_while(|meta_base| meta_base.static_class_literal(db))
             .find_map(|(meta_base, _)| meta_setting(db, &env, meta_base, "proxy"))
             .unwrap_or(false),
+    }
+}
+
+/// Keep a model abstract or a proxy only if every iteration of a cycle found it so.
+///
+/// An option can depend on the relations that it controls, as in `abstract = f(Author.book_set)`
+/// for a model with a foreign key to `Author`: whether `Author.book_set` exists depends on whether
+/// the model is abstract. Once the cycle has had a few iterations to settle, an option that one
+/// iteration turned off stays off. Each option can then change only once, so the iteration reaches
+/// a fixed point. Like the start of the cycle, this prefers a model that is neither abstract nor
+/// a proxy.
+// Salsa passes the value of the previous iteration by reference.
+#[expect(clippy::trivially_copy_pass_by_ref)]
+fn model_metadata_cycle_fn<'db>(
+    _db: &'db dyn Db,
+    cycle: &salsa::Cycle,
+    previous: &ModelMetadata,
+    current: ModelMetadata,
+    _class: StaticClassLiteral<'db>,
+) -> ModelMetadata {
+    if cycle.iteration() <= crate::TAINTED_CYCLES {
+        return current;
+    }
+    ModelMetadata {
+        is_abstract: previous.is_abstract && current.is_abstract,
+        is_proxy: previous.is_proxy && current.is_proxy,
     }
 }
 
