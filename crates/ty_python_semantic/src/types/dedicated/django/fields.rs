@@ -168,7 +168,28 @@ pub(super) struct FieldMetadata {
 }
 
 /// All fields defined on this Django model (not including base class fields).
-#[salsa::tracked(returns(deref), heap_size=ruff_memory_usage::heap_size)]
+///
+/// The fields of a model can depend on themselves. A value in the class body can read an attribute
+/// that another model does not declare:
+/// ```py
+/// class Book(models.Model):
+///     author = models.ForeignKey(Author, on_delete=models.CASCADE)
+///     status = models.CharField(max_length=1, default=Author.DEFAULT_STATUS)
+/// ```
+/// To look up `Author.DEFAULT_STATUS`, we try the reverse accessors of `Author`. Those come from the
+/// fields of every model, so they read the fields of `Book` again. The cycle starts from a model
+/// without fields.
+///
+/// Django adds every value of the class body that is a field, however the body binds it: with an
+/// assignment, an import, a `for` loop or a `with` statement, for example. Methods and nested
+/// classes are never fields, so we do not infer their types. A decorator of a method can read an
+/// attribute of another model too, and so stays out of the cycle.
+#[salsa::tracked(
+    returns(deref),
+    cycle_initial=|_, _, _| Box::default(),
+    cycle_fn=own_model_fields_cycle_fn,
+    heap_size=ruff_memory_usage::heap_size
+)]
 pub(super) fn own_model_fields<'db>(
     db: &'db dyn Db,
     class: StaticClassLiteral<'db>,
@@ -185,6 +206,12 @@ pub(super) fn own_model_fields<'db>(
                     .definition()
                     .map(|definition| (name, definition))
             })
+        })
+        .filter(|(_, definition)| {
+            !matches!(
+                definition.kind(db),
+                DefinitionKind::Function(_) | DefinitionKind::Class(_)
+            )
         })
         .filter_map(|(name, definition)| {
             let field_ty = binding_type(db, definition);
@@ -205,6 +232,45 @@ pub(super) fn own_model_fields<'db>(
             ))
         })
         .collect()
+}
+
+/// Keep the fields of earlier iterations of a cycle.
+///
+/// The metadata of a field can depend on the reverse accessor that the field itself creates:
+/// ```py
+/// class Book(models.Model):
+///     author = models.ForeignKey(
+///         Author, on_delete=models.CASCADE, related_name=name_for(Author.book_set)
+///     )
+/// ```
+/// Suppose that `name_for` returns the literal `"others"` for a reverse accessor. While the field has
+/// no related name, `Author.book_set` exists, so the field gets the related name `"others"`. Then
+/// `Author.book_set` no longer exists, and the field has no related name again. The field would
+/// change on every iteration. Once the cycle has had a few iterations to settle, a field stays in
+/// the list, so the iteration reaches a fixed point. The fields stay in the order of their names in
+/// the class body.
+///
+/// The list keeps every distinct field that an iteration found, so in such a cycle one name can
+/// have two fields, and a lookup of the name finds the earlier one.
+fn own_model_fields_cycle_fn<'db>(
+    db: &'db dyn Db,
+    cycle: &salsa::Cycle,
+    previous: &[Field<'db>],
+    current: Box<[Field<'db>]>,
+    class: StaticClassLiteral<'db>,
+) -> Box<[Field<'db>]> {
+    if cycle.iteration() <= crate::TAINTED_CYCLES {
+        return current;
+    }
+    let mut fields = previous.to_vec();
+    for field in current {
+        if !fields.contains(&field) {
+            fields.push(field);
+        }
+    }
+    let table = place_table(db, class.body_scope(db));
+    fields.sort_by_key(|field| table.symbol_id(&field.symbol));
+    fields.into_boxed_slice()
 }
 
 /// Metadata extracted from a Django model's `Meta` configuration.
