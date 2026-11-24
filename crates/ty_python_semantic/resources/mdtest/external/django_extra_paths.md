@@ -83,3 +83,47 @@ def _(member: Member):
 
 Book.objects.order_by("titel")  # error: [invalid-argument-type] "Cannot resolve keyword 'titel' into field"
 ```
+
+## WithAnnotations from a type statement
+
+A package on the extra search path takes the place of an installed one. A `django_stubs_ext` there
+can declare `WithAnnotations` with a `type` statement:
+
+`server/django_stubs_ext/__init__.py`:
+
+```py
+from .annotations import Annotations as Annotations, WithAnnotations as WithAnnotations
+```
+
+`server/django_stubs_ext/annotations.py`:
+
+```py
+from collections.abc import Mapping
+from typing import Annotated, Any, Generic, TypeVar
+
+from django.db.models import Model
+
+_A = TypeVar("_A", covariant=True, bound=Mapping[str, Any])
+
+class Annotations(Generic[_A]): ...
+
+type WithAnnotations[T: Model, A: Mapping[str, Any]] = Annotated[T, Annotations[A]]
+```
+
+`server/notes.py`:
+
+```py
+from typing import TypedDict
+
+from django.db import models
+from django_stubs_ext import WithAnnotations
+
+class Note(models.Model):
+    text = models.CharField(max_length=100)
+
+class TextLength(TypedDict):
+    text_length: int
+
+def _(note: WithAnnotations[Note, TextLength]):
+    reveal_type(note.text_length)  # revealed: int
+```
