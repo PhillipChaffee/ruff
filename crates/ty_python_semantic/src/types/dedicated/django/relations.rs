@@ -17,7 +17,7 @@ use super::fields::{
     Field, ModelReference, model_metadata, own_model_fields, specialized_field_type,
 };
 use super::managers::default_manager;
-use super::model::concrete_model;
+use super::model::{automatic_parent_links, concrete_model, copied_abstract_bases};
 use super::project::{imported_model, models_modules, relation_source_models, user_model};
 use super::{inherits_from, is_model};
 
@@ -209,15 +209,13 @@ pub(super) fn incoming_relations<'db>(
         let source_name = source.name(db).to_lowercase();
         let source_ty = Type::instance(db, &env, imported_source.default_specialization(db));
 
-        // A model that inherits from a concrete model is reachable from its parent.
+        // A model that inherits from a concrete model is reachable from its parent, through its
+        // own parent link or through one that it copies from an abstract base class.
         if imported_source != class
-            && !model_metadata(db, source).is_proxy
-            && source
-                .explicit_bases(db)
-                .iter()
-                .filter_map(|base| concrete_model(db, base.to_class_type(db)?))
-                .filter_map(|parent| parent.static_class_literal(db))
-                .any(|(parent, _)| imported_model(db, parent) == Some(class))
+            && std::iter::once(source)
+                .chain(copied_abstract_bases(db, source))
+                .flat_map(|declaring| automatic_parent_links(db, declaring))
+                .any(|parent| imported_model(db, *parent) == Some(class))
         {
             relations.push(IncomingRelation {
                 source: imported_source,

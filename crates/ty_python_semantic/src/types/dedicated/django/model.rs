@@ -202,10 +202,10 @@ pub(super) fn field_keyword_parameters<'db>(
         }
 
         // A model that inherits from a concrete model has an automatic link to that parent.
-        if base != class && !model_metadata(db, base).is_abstract {
-            let parent = base.name(db).to_lowercase();
-            keywords.push((Name::new(format!("{parent}_ptr")), any));
-            keywords.push((Name::new(format!("{parent}_ptr_id")), any));
+        for parent in automatic_parent_links(db, base) {
+            let parent_name = parent.name(db).to_lowercase();
+            keywords.push((Name::new(format!("{parent_name}_ptr")), any));
+            keywords.push((Name::new(format!("{parent_name}_ptr_id")), any));
         }
     }
     if !has_primary_key {
@@ -605,8 +605,8 @@ fn foreign_key_id_type<'db>(
 ///     pass
 /// ```
 ///
-/// This only covers the links from `class` to its direct bases. Subclasses of `class` find them
-/// through the regular attribute lookup on their base classes.
+/// This only covers the links that Django adds to `class` itself (see [`automatic_parent_links`]).
+/// Subclasses of `class` find them through the regular attribute lookup on their base classes.
 pub(super) fn parent_link_member<'db>(
     db: &'db dyn Db,
     env: &ProgramEnvironment<'db>,
@@ -619,30 +619,18 @@ pub(super) fn parent_link_member<'db>(
         None => (name.strip_suffix("_ptr")?, false),
     };
 
-    // A proxy model uses the database table of its parent, so there is nothing to link.
-    if model_metadata(db, class).is_proxy {
-        return None;
-    }
-
-    let parent = class
-        .explicit_bases(db)
+    let parent = automatic_parent_links(db, class)
         .iter()
-        .filter_map(|base| concrete_model(db, base.to_class_type(db)?))
         .find(|parent| parent.name(db).to_lowercase() == parent_name)?;
-    let parent_ty =
-        Type::instance(db, env, parent).apply_optional_specialization(db, specialization);
-
-    // A field declared with `parent_link=True` replaces the automatic link to its related model.
-    // If we cannot tell which model that is, we do not synthesize a link.
-    if own_model_fields(db, class)
-        .iter()
-        .filter(|field| field.metadata.parent_link)
-        .any(|field| {
-            related_model(db, env, class, class, field).is_none_or(|related| related == parent_ty)
-        })
-    {
-        return None;
-    }
+    // The parent with the type arguments that `class` gives it, as in `class Ebook(Book[int])`.
+    let parent = class
+        .iter_mro(db, specialization)
+        .filter_map(ClassBase::into_class)
+        .find(|base| {
+            base.static_class_literal(db)
+                .is_some_and(|(base, _)| base == *parent)
+        })?;
+    let parent_ty = Type::instance(db, env, parent);
 
     if is_id {
         parent_ty
@@ -652,6 +640,127 @@ pub(super) fn parent_link_member<'db>(
     } else {
         Some(parent_ty)
     }
+}
+
+/// The concrete models that `model` links to with an automatic `<parent>_ptr` field.
+///
+/// This follows `ModelBase.__new__` in `django/db/models/base.py`. Each direct base class that is
+/// a concrete or proxy model gives a link to its concrete model (see [`concrete_model`]). The link
+/// is left out if the model already links to that parent: with a `OneToOneField` declared with
+/// `parent_link=True`, or with a link that it copies from an abstract base class (see
+/// [`copied_abstract_bases`]). A proxy model has no links. If we cannot resolve the related model
+/// of a `parent_link=True` field, we synthesize no links.
+///
+/// The links can depend on themselves, when a child of `Book` or its `Meta` reads an attribute
+/// that `Book` does not declare, such as `Book.MISSING`. To look it up, we try the reverse
+/// accessors of `Book`, which include the links of its children. The cycle starts from a model
+/// without links.
+#[salsa::tracked(
+    returns(deref),
+    cycle_initial=|_, _, _| Box::default(),
+    cycle_fn=automatic_parent_links_cycle_fn,
+    heap_size=ruff_memory_usage::heap_size
+)]
+pub(super) fn automatic_parent_links<'db>(
+    db: &'db dyn Db,
+    model: StaticClassLiteral<'db>,
+) -> Box<[StaticClassLiteral<'db>]> {
+    if model_metadata(db, model).is_proxy {
+        return Box::default();
+    }
+    let env = ProgramEnvironment::from_scope(model.body_scope(db));
+    let abstract_bases = copied_abstract_bases(db, model);
+
+    // The parents that the model already links to.
+    let mut linked = Vec::new();
+    for declaring in std::iter::once(model).chain(abstract_bases.iter().copied()) {
+        // Django ignores `parent_link=True` on a field that is not a `OneToOneField`.
+        let explicit_links = own_model_fields(db, declaring).iter().filter(|field| {
+            field.metadata.parent_link
+                && field
+                    .ty
+                    .nominal_class(db, &env)
+                    .and_then(|field_class| field_class.static_class_literal(db))
+                    .is_some_and(|(field_class, _)| {
+                        inherits_from(db, field_class, KnownClass::DjangoOneToOneField)
+                    })
+        });
+        for field in explicit_links {
+            let Some((related, _)) = related_model(db, &env, declaring, model, field)
+                .and_then(|related| related.nominal_class(db, &env)?.static_class_literal(db))
+            else {
+                return Box::default();
+            };
+            linked.push(related);
+        }
+    }
+    for abstract_base in &abstract_bases {
+        linked.extend(automatic_parent_links(db, *abstract_base));
+    }
+
+    let mut parents = Vec::new();
+    for base in model.explicit_bases(db) {
+        if let Some((parent, _)) = base
+            .to_class_type(db)
+            .and_then(|base| concrete_model(db, base))
+            .and_then(|parent| parent.static_class_literal(db))
+            && !linked.contains(&parent)
+            && !parents.contains(&parent)
+        {
+            parents.push(parent);
+        }
+    }
+    parents.into_boxed_slice()
+}
+
+/// Keep the links of earlier iterations of a cycle. Once the cycle has had a few iterations to
+/// settle, the links are those of the previous iteration followed by the new ones of the current
+/// iteration, each model once. The list can then only grow, so the iteration reaches a fixed point.
+fn automatic_parent_links_cycle_fn<'db>(
+    _db: &'db dyn Db,
+    cycle: &salsa::Cycle,
+    previous: &[StaticClassLiteral<'db>],
+    current: Box<[StaticClassLiteral<'db>]>,
+    _model: StaticClassLiteral<'db>,
+) -> Box<[StaticClassLiteral<'db>]> {
+    if cycle.iteration() <= crate::TAINTED_CYCLES {
+        return current;
+    }
+    let mut links = previous.to_vec();
+    for link in current {
+        if !links.contains(&link) {
+            links.push(link);
+        }
+    }
+    links.into_boxed_slice()
+}
+
+/// The abstract models whose fields Django copies into `model`: its direct base classes that are
+/// abstract models, their own direct base classes that are abstract models, and so on.
+///
+/// A base class that is not abstract keeps its fields in its own table, including the ones that it
+/// copied from its abstract base classes.
+pub(super) fn copied_abstract_bases<'db>(
+    db: &'db dyn Db,
+    model: StaticClassLiteral<'db>,
+) -> Vec<StaticClassLiteral<'db>> {
+    let mut abstract_bases = Vec::new();
+    let mut pending = vec![model];
+    while let Some(class) = pending.pop() {
+        for base in class.explicit_bases(db) {
+            if let Some((base, _)) = base
+                .to_class_type(db)
+                .and_then(|base| base.static_class_literal(db))
+                && is_model(db, base)
+                && model_metadata(db, base).is_abstract
+                && !abstract_bases.contains(&base)
+            {
+                abstract_bases.push(base);
+                pending.push(base);
+            }
+        }
+    }
+    abstract_bases
 }
 
 /// Returns the model whose database table stores the rows of `model`: a concrete model itself, or

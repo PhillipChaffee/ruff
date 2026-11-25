@@ -10,6 +10,7 @@ use crate::types::{ClassBase, KnownClass, StaticClassLiteral, Type, UnionType};
 use crate::{Db, ProgramEnvironment};
 
 use super::fields::{model_metadata, own_model_fields};
+use super::model::automatic_parent_links;
 use super::project::is_project_search_path;
 use super::relations::{incoming_relations, is_foreign_key, related_model};
 use super::{inherits_from, is_django_file, is_model};
@@ -127,6 +128,7 @@ fn model_names<'db>(db: &'db dyn Db, model: StaticClassLiteral<'db>) -> ModelNam
     }];
     let mut is_complete = true;
     let mut has_primary_key = false;
+    let mut linked_parents = Vec::new();
 
     for base in model.iter_mro(db, None) {
         let base = match base {
@@ -198,30 +200,36 @@ fn model_names<'db>(db: &'db dyn Db, model: StaticClassLiteral<'db>) -> ModelNam
             }
         }
 
-        if model_metadata(db, base).is_abstract {
-            continue;
-        }
         // A model that inherits from a concrete model links to it through `<parent>_ptr`, which
-        // is the primary key of the inheriting model.
-        if base != model {
-            let parent = base.name(db).to_lowercase();
+        // is the primary key of the inheriting model. Two abstract base classes that inherit from
+        // the same model both add the link, but the model has it once.
+        for parent in automatic_parent_links(db, base) {
+            if linked_parents.contains(parent) {
+                continue;
+            }
+            linked_parents.push(*parent);
+            let parent_name = parent.name(db).to_lowercase();
             names.push(ModelName {
-                name: Name::new(format!("{parent}_ptr")),
+                name: Name::new(format!("{parent_name}_ptr")),
                 kind: ModelNameKind::ForwardRelation {
-                    related: Some(base),
+                    related: Some(*parent),
                     null: false,
                     is_many: false,
                 },
                 is_primary_key: true,
             });
             names.push(ModelName {
-                name: Name::new(format!("{parent}_ptr_id")),
+                name: Name::new(format!("{parent_name}_ptr_id")),
                 kind: ModelNameKind::Field {
                     null: false,
                     is_alias: true,
                 },
                 is_primary_key: true,
             });
+        }
+
+        if model_metadata(db, base).is_abstract {
+            continue;
         }
         // A model also has the relations to its concrete parents.
         let incoming = incoming_relations(db, base);
