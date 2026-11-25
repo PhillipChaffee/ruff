@@ -1,6 +1,6 @@
 //! The fields of a model and its `Meta` options, read from the model's class body.
 
-use ruff_db::parsed::parsed_module;
+use ruff_db::parsed::{ParsedModuleRef, parsed_module};
 use ruff_python_ast::{self as ast, name::Name};
 use ty_module_resolver::{KnownModule, file_to_module};
 use ty_python_core::{
@@ -49,38 +49,49 @@ impl<'db> Field<'db> {
     /// Create a field from its definition in the body of a model, or return `None` if the
     /// definition does not assign a Django field.
     ///
-    /// The type of a field is the type of the attribute, unless the attribute's annotation is not
-    /// a field, as in this mistaken annotation:
+    /// The type of the field is the binding type, which follows the attribute's annotation,
+    /// unless that is not the field the assigned value constructs. An annotation can narrow the
+    /// types of a field that matches it, and then decides them:
+    /// ```py
+    /// class Leaflet(models.Model):
+    ///     title: models.CharField[str, str] = char_field()  # returns `CharField[Any, Any]`
+    /// ```
+    /// A value that does not match the annotation reports `invalid-assignment`, and its binding
+    /// type is still the annotation. Django creates the field that the value constructs, so the
+    /// type of the value is the type of the field, and the mistake is reported only once:
     /// ```py
     /// class Shelf(models.Model):
     ///     limit: models.IntegerField | None = models.IntegerField(null=True)
+    ///     label: models.CharField = models.CharField(max_length=20, null=True)
     /// ```
-    /// Django creates the field that the value constructs, so the type of the value is the type
-    /// of the field.
+    /// Both fields are nullable, so `Shelf(limit=None, label=None)` is fine. Reading the attribute
+    /// follows its annotation, through the class member, not through this type.
+    ///
+    /// If the value is not a field, as for `email: models.EmailField = ...` in a stub file, the
+    /// binding type decides.
     fn from_definition(
         db: &'db dyn Db,
         env: &ProgramEnvironment<'db>,
+        module: &ParsedModuleRef,
         name: Name,
         definition: Definition<'db>,
     ) -> Option<Self> {
-        let module = parsed_module(db, definition.python_file(db)).load(db);
         let value = match definition.kind(db) {
             DefinitionKind::Assignment(assignment) if assignment.unpack().is_none() => {
-                Some(assignment.value(&module))
+                Some(assignment.value(module))
             }
-            DefinitionKind::AnnotatedAssignment(assignment) => assignment.value(&module),
+            DefinitionKind::AnnotatedAssignment(assignment) => assignment.value(module),
             _ => None,
         };
         let binding_ty = binding_type(db, definition);
-        let ty = if is_field_instance(db, env, binding_ty) {
-            binding_ty
-        } else {
-            let value_ty = definition_expression_type(db, definition, value?);
-            if !is_field_instance(db, env, value_ty) {
-                return None;
-            }
-            value_ty
-        };
+        let binding_is_field = is_field_instance(db, env, binding_ty);
+        let ty = value
+            .map(|value| definition_expression_type(db, definition, value))
+            .filter(|&value_ty| {
+                is_field_instance(db, env, value_ty)
+                    && !(binding_is_field && value_ty.is_assignable_to(db, env, binding_ty))
+            })
+            .or_else(|| binding_is_field.then_some(binding_ty))?;
         let mut field = Field {
             symbol: name.clone(),
             name,
@@ -191,6 +202,7 @@ pub(super) fn own_model_fields<'db>(
 ) -> Box<[Field<'db>]> {
     let env = ProgramEnvironment::from_scope(class.body_scope(db));
     let table = place_table(db, class.body_scope(db));
+    let module = parsed_module(db, class.body_scope(db).python_file(db)).load(db);
     use_def_map(db, class.body_scope(db))
         .all_end_of_scope_symbol_bindings()
         .flat_map(|(symbol_id, bindings)| {
@@ -202,7 +214,9 @@ pub(super) fn own_model_fields<'db>(
                     .map(|definition| (name, definition))
             })
         })
-        .filter_map(|(name, definition)| Field::from_definition(db, &env, name.clone(), definition))
+        .filter_map(|(name, definition)| {
+            Field::from_definition(db, &env, &module, name.clone(), definition)
+        })
         .collect()
 }
 

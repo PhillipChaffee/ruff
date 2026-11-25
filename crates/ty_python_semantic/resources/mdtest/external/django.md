@@ -311,6 +311,50 @@ def _():
     Member.objects.values_list("shelf__limit")  # ok
 ```
 
+The keywords take the values of the field that the call creates, not those of the annotation. A
+nullable field accepts `None` even if its annotation leaves `None` out, so the mistake is reported
+once, at the declaration:
+
+```py
+class Volume(models.Model):
+    # error: [invalid-assignment] "Object of type `CharField[str | int | None, str | None]` is not assignable to `CharField[str | int, str]`"
+    subtitle: models.CharField = models.CharField(max_length=10, null=True)
+    # error: [invalid-assignment] "Object of type `ForeignKey[Shelf | None, Shelf | None]` is not assignable to `ForeignKey[Shelf, Shelf]`"
+    shelf: "models.ForeignKey[Shelf, Shelf]" = models.ForeignKey(Shelf, null=True, on_delete=models.SET_NULL)
+
+def _(volume: Volume):
+    reveal_type(volume.subtitle)  # revealed: str
+    reveal_type(volume.shelf_id)  # revealed: int | None
+
+    Volume(subtitle=None, shelf=None)  # ok
+    Volume.objects.create(subtitle=None, shelf=None)  # ok
+    Volume.objects.update(subtitle=None, shelf=None)  # ok
+    Volume.objects.update(subtitle=models.F("subtitle"), shelf=models.F("shelf"))  # ok
+    Volume(shelf=models.F("shelf"))  # error: [invalid-argument-type] "Expected `Shelf | None`, found `F`"
+
+async def _():
+    await Volume.objects.acreate(subtitle=None)  # ok
+    await Volume.objects.aupdate(subtitle=None)  # ok
+```
+
+An annotation that the field matches, but that narrows its types, decides the types of the keywords.
+Here the field comes from a function whose return type leaves the types open:
+
+```py
+from typing import Any
+
+def char_field() -> models.CharField[Any, Any]:
+    return models.CharField(max_length=5)
+
+class Leaflet(models.Model):
+    title: "models.CharField[str, str]" = char_field()  # ok
+
+def _():
+    Leaflet(title="Dune")  # ok
+    Leaflet(title=1)  # error: [invalid-argument-type]
+    Leaflet.objects.update(title=1)  # error: [invalid-argument-type]
+```
+
 An annotation that includes `None`, an annotation of a non-nullable field, and a field without an
 annotation are fine:
 
