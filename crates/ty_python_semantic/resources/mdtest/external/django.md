@@ -287,6 +287,30 @@ def _(settings: Settings):
     reveal_type(settings.enabled)  # revealed: bool
 ```
 
+An annotation such as `models.BooleanField | None` adds `None` to the attribute, not to the values
+of the field: it means `BooleanField[bool, bool] | None`, which a nullable field does not match. A
+field whose annotation does not match is still a field of the model. Its name is a keyword of the
+constructor, `create()` and `update()`, and a field name in queries:
+
+```py
+class Shelf(models.Model):
+    # error: [invalid-assignment] "Object of type `BooleanField[bool | None, bool | None]` is not assignable to `BooleanField[bool, bool] | None`"
+    is_active: models.BooleanField | None = models.BooleanField(null=True)
+    # error: [invalid-assignment] "Object of type `IntegerField[float | str | None, int | None]` is not assignable to `IntegerField[float | str, int] | None`"
+    limit: models.IntegerField | None = models.IntegerField(null=True, blank=True)
+
+class Member(models.Model):
+    shelf = models.ForeignKey(Shelf, on_delete=models.CASCADE)
+
+def _():
+    Shelf(is_active=True)  # ok
+    Shelf(is_active=None)  # ok
+    Shelf.objects.create(limit=1)  # ok
+    Shelf.objects.update(is_active=False, limit=2)  # ok
+    Shelf.objects.filter(limit__gt=1).values("is_active")  # ok
+    Member.objects.values_list("shelf__limit")  # ok
+```
+
 An annotation that includes `None`, an annotation of a non-nullable field, and a field without an
 annotation are fine:
 
@@ -305,6 +329,13 @@ class Preferences(models.Model):
 def _(preferences: Preferences):
     reveal_type(preferences.enabled)  # revealed: bool | None
     reveal_type(preferences.pinned)  # revealed: bool | None
+```
+
+Each of them is a field of the model, also the one whose annotation is `Any`:
+
+```py
+Preferences(anything=None, loose=None)  # ok
+Preferences.objects.filter(anything__isnull=True).values("anything")  # ok
 ```
 
 `null=True` also adds `None` to the values of the base class `Field`, whose value types are `Any`:
@@ -426,6 +457,18 @@ Article(view_count=1)
 
 # Using the original attribute name is incorrect.
 Article(views=1)  # error: [unknown-argument]
+```
+
+A field whose annotation does not match it is renamed in the same way:
+
+```py
+class Notice(models.Model):
+    # error: [invalid-assignment]
+    body: models.CharField | None = models.CharField(max_length=100, name="text", null=True)
+
+def _(notice: Notice):
+    reveal_type(notice.text)  # revealed: str | None
+    notice.body  # error: [missing-attribute]
 ```
 
 ## Primary keys

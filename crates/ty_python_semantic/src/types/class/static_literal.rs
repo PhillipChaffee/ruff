@@ -1730,12 +1730,7 @@ impl<'db> StaticClassLiteral<'db> {
             }
         });
 
-        if member
-            .inner
-            .place
-            .ignore_possibly_undefined()
-            .is_some_and(|ty| django::is_renamed_field(db, env, self, name, ty))
-        {
+        if !member.inner.place.is_undefined() && django::is_renamed_field(db, self, name) {
             return Member::unbound();
         }
 

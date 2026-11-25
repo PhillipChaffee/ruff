@@ -46,13 +46,41 @@ pub(super) struct Field<'db> {
 }
 
 impl<'db> Field<'db> {
-    /// Create a field by extracting the metadata from its definition.
+    /// Create a field from its definition in the body of a model, or return `None` if the
+    /// definition does not assign a Django field.
+    ///
+    /// The type of a field is the type of the attribute, unless the attribute's annotation is not
+    /// a field, as in this mistaken annotation:
+    /// ```py
+    /// class Shelf(models.Model):
+    ///     limit: models.IntegerField | None = models.IntegerField(null=True)
+    /// ```
+    /// Django creates the field that the value constructs, so the type of the value is the type
+    /// of the field.
     fn from_definition(
         db: &'db dyn Db,
+        env: &ProgramEnvironment<'db>,
         name: Name,
-        ty: Type<'db>,
         definition: Definition<'db>,
-    ) -> Self {
+    ) -> Option<Self> {
+        let module = parsed_module(db, definition.python_file(db)).load(db);
+        let value = match definition.kind(db) {
+            DefinitionKind::Assignment(assignment) if assignment.unpack().is_none() => {
+                Some(assignment.value(&module))
+            }
+            DefinitionKind::AnnotatedAssignment(assignment) => assignment.value(&module),
+            _ => None,
+        };
+        let binding_ty = binding_type(db, definition);
+        let ty = if is_field_instance(db, env, binding_ty) {
+            binding_ty
+        } else {
+            let value_ty = definition_expression_type(db, definition, value?);
+            if !is_field_instance(db, env, value_ty) {
+                return None;
+            }
+            value_ty
+        };
         let mut field = Field {
             symbol: name.clone(),
             name,
@@ -61,20 +89,8 @@ impl<'db> Field<'db> {
             through: None,
             metadata: FieldMetadata::default(),
         };
-        let module = parsed_module(db, definition.python_file(db)).load(db);
-        let kind = definition.kind(db);
-        let value = match &kind {
-            DefinitionKind::Assignment(assignment) => assignment.value(&module),
-            DefinitionKind::AnnotatedAssignment(assignment) => {
-                let Some(value) = assignment.value(&module) else {
-                    return field;
-                };
-                value
-            }
-            _ => return field,
-        };
-        let Some(call) = value.as_call_expr() else {
-            return field;
+        let Some(call) = value.and_then(ast::Expr::as_call_expr) else {
+            return Some(field);
         };
 
         field.to = call
@@ -108,7 +124,7 @@ impl<'db> Field<'db> {
         field.metadata.related_query_name = string("related_query_name");
         field.metadata.parent_link = is_true("parent_link");
         field.metadata.symmetrical = keyword("symmetrical").and_then(Type::as_bool_literal);
-        field
+        Some(field)
     }
 }
 
@@ -186,25 +202,18 @@ pub(super) fn own_model_fields<'db>(
                     .map(|definition| (name, definition))
             })
         })
-        .filter_map(|(name, definition)| {
-            let field_ty = binding_type(db, definition);
-            let is_field = field_ty.nominal_class(db, &env).is_some_and(|class| {
-                class
-                    .iter_mro(db)
-                    .filter_map(ClassBase::into_class)
-                    .any(|base| base.is_known(db, KnownClass::DjangoField))
-            });
-            if !is_field {
-                return None;
-            }
-            Some(Field::from_definition(
-                db,
-                name.clone(),
-                field_ty,
-                definition,
-            ))
-        })
+        .filter_map(|(name, definition)| Field::from_definition(db, &env, name.clone(), definition))
         .collect()
+}
+
+/// Whether `ty` is an instance of a Django field class.
+fn is_field_instance<'db>(db: &'db dyn Db, env: &ProgramEnvironment<'db>, ty: Type<'db>) -> bool {
+    ty.nominal_class(db, env).is_some_and(|class| {
+        class
+            .iter_mro(db)
+            .filter_map(ClassBase::into_class)
+            .any(|base| base.is_known(db, KnownClass::DjangoField))
+    })
 }
 
 /// Metadata extracted from a Django model's `Meta` configuration.
@@ -370,7 +379,7 @@ pub(super) fn renamed_field<'db>(
 }
 
 /// Returns whether `name` is the name that a field of the model `class` is assigned to, but not
-/// the name of the attribute that Django creates for it. `ty` is the type of the class member.
+/// the name of the attribute that Django creates for it.
 ///
 /// Django removes the original attribute of a field whose `name` argument renames it:
 /// ```py
@@ -381,18 +390,10 @@ pub(super) fn renamed_field<'db>(
 /// ```
 pub(in crate::types) fn is_renamed_field<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
     class: StaticClassLiteral<'db>,
     name: &str,
-    ty: Type<'db>,
 ) -> bool {
     is_model(db, class)
-        && ty.nominal_class(db, env).is_some_and(|field_class| {
-            field_class
-                .iter_mro(db)
-                .filter_map(ClassBase::into_class)
-                .any(|base| base.is_known(db, KnownClass::DjangoField))
-        })
         && own_model_fields(db, class)
             .iter()
             .any(|field| field.symbol == name && field.name != name)
