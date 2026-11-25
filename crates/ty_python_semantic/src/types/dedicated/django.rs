@@ -3,13 +3,15 @@
 //! The members that Django creates at runtime are synthesized by [`synthesized_member`].
 
 use ruff_python_ast as ast;
+use rustc_hash::FxHashSet;
+use smallvec::SmallVec;
 use ty_module_resolver::file_to_module;
 use ty_python_core::ProgramFile;
 
 use crate::types::call::{Binding, Bindings, CallArguments};
 use crate::types::context::InferContext;
 use crate::types::{
-    BoundMethodType, ClassBase, KnownClass, Specialization, StaticClassLiteral, Type,
+    BoundMethodType, ClassBase, ClassType, KnownClass, Specialization, StaticClassLiteral, Type,
 };
 use crate::{Db, ProgramEnvironment};
 
@@ -220,13 +222,69 @@ pub(in crate::types) fn method_return_type<'db>(
     }
 }
 
+/// The class of the instance type `ty` that `accept` accepts: the class of `ty`, or of the first
+/// positive element of an intersection that `accept` accepts.
+///
+/// A type has the class that `Type::nominal_class` gives it: a type alias resolves to its value, a
+/// type variable, such as an unannotated `self`, to its upper bound, and a `NewType` to its base.
+/// A value or a bound that is an intersection follows the rule for intersections.
+///
+/// `annotate()` on a custom `QuerySet` class returns an intersection such as
+/// `StoryQuerySet & QuerySet[Story & <Protocol with members 'n'>, ...]`, whose instances are
+/// intersections such as `Story & <Protocol with members 'n'>`. django-stubs-ext's
+/// `WithAnnotations[Story, ...]` is a type alias of such an intersection, and `isinstance()` can
+/// narrow an instance of another class to `Mixin & Story`.
+pub(super) fn instance_class<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+    ty: Type<'db>,
+    accept: impl Fn(ClassType<'db>) -> bool,
+) -> Option<ClassType<'db>> {
+    // Not generic, because recursing with `&accept` would instantiate a new function per level.
+    fn accepted_class<'db>(
+        db: &'db dyn Db,
+        env: &ProgramEnvironment<'db>,
+        ty: Type<'db>,
+        accept: &dyn Fn(ClassType<'db>) -> bool,
+    ) -> Option<ClassType<'db>> {
+        match ty.resolve_type_alias(db) {
+            Type::Intersection(intersection) => intersection
+                .iter_positive(db)
+                .find_map(|element| accepted_class(db, env, element, accept)),
+            Type::TypeVar(type_var) => {
+                accepted_class(db, env, type_var.typevar(db).upper_bound(db, env)?, accept)
+            }
+            Type::NewTypeInstance(newtype) => {
+                accepted_class(db, env, newtype.concrete_base_type(db), accept)
+            }
+            ty => ty.nominal_class(db, env).filter(|class| accept(*class)),
+        }
+    }
+    accepted_class(db, env, ty, &accept)
+}
+
+/// The model class of a model instance type, such as `Book`, `Book & <Protocol with members 'n'>`
+/// or `Mixin & Book`.
+pub(super) fn model_class<'db>(
+    db: &'db dyn Db,
+    env: &ProgramEnvironment<'db>,
+    ty: Type<'db>,
+) -> Option<(StaticClassLiteral<'db>, Option<Specialization<'db>>)> {
+    instance_class(db, env, ty, |class| {
+        class
+            .static_class_literal(db)
+            .is_some_and(|(class, _)| is_model(db, class))
+    })?
+    .static_class_literal(db)
+}
+
 /// Returns whether `ty` is an instance of one of Django's `QuerySet` or manager classes.
 fn is_queryset_or_manager<'db>(
     db: &'db dyn Db,
     env: &ProgramEnvironment<'db>,
     ty: Type<'db>,
 ) -> bool {
-    ty.nominal_class(db, env).is_some_and(|class| {
+    instance_class(db, env, ty, |class| {
         class
             .iter_mro(db)
             .filter_map(ClassBase::into_class)
@@ -235,6 +293,7 @@ fn is_queryset_or_manager<'db>(
                     || base.is_known(db, KnownClass::DjangoBaseManager)
             })
     })
+    .is_some()
 }
 
 /// Report the arguments of a call to a Django method that Django rejects at runtime, although the
@@ -252,35 +311,56 @@ pub(in crate::types) fn report_queryset_call<'db>(
     let db = context.db();
     let env = context.program_environment();
     let arguments = &call_expression.arguments;
-    for binding in bindings.iter_flat() {
-        let Type::BoundMethod(bound_method) = binding.callable_type else {
-            continue;
-        };
-        let Some(function) = bound_method.function(db) else {
-            continue;
-        };
-        let name = function.name(db).as_str();
-        let field_names_method = FieldNamesMethod::from_name(name);
-        if !(field_names_method.is_some() || matches!(name, "values_list" | "save" | "asave"))
-            // A method of the project that overrides one of Django's can accept other arguments.
-            || !is_django_file(db, function.program_file(db))
-        {
+    // The methods that we check: their binding, receiver and name, and whether Django declares
+    // them.
+    let methods: SmallVec<[_; 2]> = bindings
+        .iter_flat()
+        .filter_map(|binding| {
+            let Type::BoundMethod(bound_method) = binding.callable_type else {
+                return None;
+            };
+            let function = bound_method.function(db)?;
+            let name = function.name(db).as_str();
+            (FieldNamesMethod::from_name(name).is_some()
+                || matches!(name, "values_list" | "save" | "asave"))
+            .then(|| {
+                let is_django = is_django_file(db, function.program_file(db));
+                (binding, bound_method.self_instance(db), name, is_django)
+            })
+        })
+        .collect();
+    // The methods of an intersection, such as `StoryQuerySet & QuerySet[...]`, are bound to the
+    // same receiver, whose call we check once. A method of the project that overrides one of
+    // Django's can accept other arguments, so we do not check a receiver that one is bound to.
+    let mut checked_receivers: FxHashSet<Type<'db>> = methods
+        .iter()
+        .filter(|(.., is_django)| !is_django)
+        .map(|&(_, receiver, ..)| receiver)
+        .collect();
+    // `self` in a model method can be an instance of a subclass, with more fields, so we do not
+    // check the fields of an instance whose model comes from a type variable.
+    let involves_type_var = |receiver: Type<'db>| match receiver {
+        Type::Intersection(intersection) => intersection
+            .iter_positive(db)
+            .any(|element| matches!(element, Type::TypeVar(_))),
+        _ => matches!(receiver, Type::TypeVar(_)),
+    };
+    for (binding, receiver, name, _) in methods {
+        if !checked_receivers.insert(receiver) {
             continue;
         }
-        let receiver = bound_method.self_instance(db);
         if name == "values_list"
             && is_queryset_or_manager(db, env, receiver)
             && let Some((_, overload)) = binding.matching_overloads().next()
         {
             report_values_list_arguments(context, arguments, overload);
         }
-        if let Some(method) = field_names_method {
+        if let Some(method) = FieldNamesMethod::from_name(name) {
             if let Some(query) = query_context(db, env, receiver) {
                 report_field_names(context, method, &query, arguments);
             }
-        } else if let Type::NominalInstance(instance) = receiver
-            && let Some((model, _)) = instance.class(db, env).static_class_literal(db)
-            && is_model(db, model)
+        } else if !involves_type_var(receiver)
+            && let Some((model, _)) = model_class(db, env, receiver)
         {
             report_update_fields(context, model, arguments);
         }

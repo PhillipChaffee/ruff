@@ -21,7 +21,7 @@ use super::fields::{Field, model_field_type, model_metadata, own_model_fields};
 use super::managers::ModelKeywords;
 use super::project::project_models;
 use super::relations::{is_foreign_key, refined_field_type, related_model};
-use super::{inherits_from, is_django_file, is_model};
+use super::{inherits_from, is_django_file, is_model, model_class};
 
 /// Synthesize the `__init__` method of a model, with one keyword parameter per name that Django's
 /// `Model.__init__` accepts.
@@ -523,22 +523,9 @@ pub(in crate::types) fn is_nullable_foreign_key_id<'db>(
     let Some(field_name) = attribute.strip_suffix("_id") else {
         return false;
     };
-    let instance = match instance {
-        Type::TypeVar(type_var) => match type_var.typevar(db).upper_bound(db, env) {
-            Some(bound) => bound,
-            None => return false,
-        },
-        _ => instance,
-    };
-    let Type::NominalInstance(instance) = instance else {
+    let Some((class, _)) = model_class(db, env, instance) else {
         return false;
     };
-    let Some((class, _)) = instance.class(db, env).static_class_literal(db) else {
-        return false;
-    };
-    if !is_model(db, class) {
-        return false;
-    }
     // The field that `book.shelf` reads is the first one named `shelf` in the MRO.
     let Some(field) = class
         .iter_mro(db, None)

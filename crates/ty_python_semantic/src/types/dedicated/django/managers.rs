@@ -16,7 +16,7 @@ use crate::{Db, ProgramEnvironment};
 
 use super::fields::default_manager_name;
 use super::model::field_keyword_parameters;
-use super::{is_django_file, is_model};
+use super::{is_django_file, is_model, model_class};
 
 /// The keyword parameters that a manager or queryset method of a model takes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -347,8 +347,7 @@ pub(super) fn related_manager_member<'db>(
     {
         return None;
     }
-    let model = *specialization?.types(db).first()?;
-    let (model, _) = model.nominal_class(db, env)?.static_class_literal(db)?;
+    let (model, _) = model_class(db, env, *specialization?.types(db).first()?)?;
     default_manager(db, model)?
         .member(db, env, name)
         .place
@@ -416,12 +415,7 @@ pub(super) fn model_keywords_method<'db>(
     } else {
         base_specialization(KnownClass::DjangoQuerySet)?
     };
-    let model = *base.types(db).first()?;
-    let (model_class, model_specialization) =
-        model.nominal_class(db, env)?.static_class_literal(db)?;
-    if !is_model(db, model_class) {
-        return None;
-    }
+    let (model, model_specialization) = model_class(db, env, *base.types(db).first()?)?;
     let [declared] = function.signature(db).overloads.as_slice() else {
         return None;
     };
@@ -432,7 +426,12 @@ pub(super) fn model_keywords_method<'db>(
     // declared method already has.
     let keyword_parameters: Vec<Vec<Parameter<'db>>> = match keywords {
         ModelKeywords::Constructor => {
-            let Type::BoundMethod(init) = model
+            let instance = Type::instance(
+                db,
+                env,
+                model.apply_optional_specialization(db, model_specialization),
+            );
+            let Type::BoundMethod(init) = instance
                 .member(db, env, "__init__")
                 .place
                 .ignore_possibly_undefined()?
@@ -462,7 +461,7 @@ pub(super) fn model_keywords_method<'db>(
         ModelKeywords::Fields => vec![field_keyword_parameters(
             db,
             env,
-            model_class,
+            model,
             model_specialization,
             ModelKeywords::Fields,
         )?],

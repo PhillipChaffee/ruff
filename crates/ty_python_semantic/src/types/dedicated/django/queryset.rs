@@ -14,14 +14,12 @@ use crate::types::context::InferContext;
 use crate::types::diagnostic::INVALID_ARGUMENT_TYPE;
 use crate::types::type_alias::TypeAliasType;
 use crate::types::typed_dict::{TypedDictFieldBuilder, TypedDictType};
-use crate::types::{
-    ClassBase, ClassType, IntersectionType, KnownClass, Specialization, Type, UnionType,
-};
+use crate::types::{ClassBase, ClassType, IntersectionType, KnownClass, Type, UnionType};
 use crate::{Db, ProgramEnvironment};
 
 use super::lookups::{LOOKUP_SEP, QueryContext, resolve_path};
 use super::relations::reverse_accessor;
-use super::{inherits_from, is_model};
+use super::{inherits_from, instance_class, is_model, model_class};
 
 /// Return the type of the instance that a call to the constructor of a Django aggregate such as
 /// `Count` creates, with the name that `annotate()` gives the aggregate when it is passed as a
@@ -172,9 +170,7 @@ fn annotated_queryset<'db, 'a>(
     declared: Type<'db>,
     attributes: impl IntoIterator<Item = (&'a str, Type<'db>)>,
 ) -> Option<Type<'db>> {
-    let class = declared.nominal_class(db, env)?;
-    let &[model, row] =
-        base_specialization(db, env, declared, KnownClass::DjangoQuerySet)?.types(db)
+    let &[model, row] = &*base_type_arguments(db, env, declared, KnownClass::DjangoQuerySet)?
     else {
         return None;
     };
@@ -190,12 +186,15 @@ fn annotated_queryset<'db, 'a>(
                 generic_context.specialize(db, vec![annotated, row])
             }),
     );
-    if class.is_known(db, KnownClass::DjangoQuerySet) {
-        Some(queryset)
-    } else {
+    let custom_class = instance_class(db, env, declared, |class| {
+        !class.is_known(db, KnownClass::DjangoQuerySet)
+    });
+    if custom_class.is_some() {
         Some(IntersectionType::from_two_elements(
             db, env, declared, queryset,
         ))
+    } else {
+        Some(queryset)
     }
 }
 
@@ -225,9 +224,7 @@ pub(super) fn prefetch_related_return_type<'db>(
     arguments: &CallArguments<'_, 'db>,
 ) -> Option<Type<'db>> {
     let declared = binding.return_type();
-    let model = *base_specialization(db, env, declared, KnownClass::DjangoQuerySet)?
-        .types(db)
-        .first()?;
+    let model = *base_type_arguments(db, env, declared, KnownClass::DjangoQuerySet)?.first()?;
     let prefetch = known_module_symbol(db, env, KnownModule::DjangoDbModelsQuery, "Prefetch")
         .place
         .ignore_possibly_undefined()?
@@ -250,8 +247,8 @@ pub(super) fn prefetch_related_return_type<'db>(
                 return None;
             }
             // Without a `queryset`, its type is the default `QuerySet[Model]`.
-            let queryset_model = base_specialization(db, env, queryset, KnownClass::DjangoQuerySet)
-                .and_then(|specialization| specialization.types(db).first().copied())
+            let queryset_model = base_type_arguments(db, env, queryset, KnownClass::DjangoQuerySet)
+                .and_then(|arguments| arguments.first().copied())
                 .filter(|related| {
                     !related
                         .nominal_class(db, env)
@@ -302,8 +299,8 @@ fn prefetched_relation<'db>(
         .member(db, env, lookup)
         .place
         .ignore_possibly_undefined()?;
-    if let Some(manager) = base_specialization(db, env, related, KnownClass::DjangoBaseManager) {
-        return Some(PrefetchedRelation::Many(*manager.types(db).first()?));
+    if let Some(manager) = base_type_arguments(db, env, related, KnownClass::DjangoBaseManager) {
+        return Some(PrefetchedRelation::Many(*manager.first()?));
     }
     let is_model_instance = related
         .filter_union(db, env, |element| !element.is_none(db))
@@ -315,9 +312,9 @@ fn prefetched_relation<'db>(
     }
     // A reverse accessor that is not a manager belongs to a `OneToOneField`, or to the link from
     // a child model to its parent, which is also a `OneToOneField`.
-    let is_reverse_one_to_one = model
-        .nominal_class(db, env)?
-        .iter_mro(db)
+    let (class, specialization) = model_class(db, env, model)?;
+    let is_reverse_one_to_one = class
+        .iter_mro(db, specialization)
         .filter_map(ClassBase::into_class)
         .filter_map(|base| base.static_class_literal(db))
         .any(|(base, _)| is_model(db, base) && reverse_accessor(db, base, lookup).is_some());
@@ -328,20 +325,39 @@ fn prefetched_relation<'db>(
     }))
 }
 
-/// Return the type arguments of the class `known` in the MRO of the class of the instance type
-/// `ty`, such as the model and row types of a custom `QuerySet` class.
-fn base_specialization<'db>(
+/// The type arguments of the class `known` for the instance type `ty`. For an intersection, each
+/// argument is the intersection of the arguments that its elements give.
+///
+/// A subclass, such as a custom `QuerySet` class, gives the arguments of `known` in its MRO.
+/// `annotate()` on a custom `QuerySet` class returns
+/// `StoryQuerySet & QuerySet[Story & <Protocol with members 'n'>, ...]`, whose model is
+/// `Story & <Protocol with members 'n'>`. Intersecting the arguments is sound for `QuerySet` and
+/// `BaseManager`, whose type parameters are covariant.
+fn base_type_arguments<'db>(
     db: &'db dyn Db,
     env: &ProgramEnvironment<'db>,
     ty: Type<'db>,
     known: KnownClass,
-) -> Option<Specialization<'db>> {
-    ty.nominal_class(db, env)?
-        .iter_mro(db)
-        .filter_map(ClassBase::into_class)
-        .filter_map(|base| base.static_class_literal(db))
-        .find(|(base, _)| base.is_known(db, known))?
-        .1
+) -> Option<Box<[Type<'db>]>> {
+    let elements = match ty {
+        Type::Intersection(intersection) => intersection.iter_positive(db).collect(),
+        _ => vec![ty],
+    };
+    let mut specializations = elements.into_iter().filter_map(|element| {
+        instance_class(db, env, element, |_| true)?
+            .iter_mro(db)
+            .filter_map(ClassBase::into_class)
+            .filter_map(|base| base.static_class_literal(db))
+            .find(|(base, _)| base.is_known(db, known))?
+            .1
+    });
+    let mut arguments: Box<[Type<'db>]> = specializations.next()?.types(db).into();
+    for specialization in specializations {
+        for (argument, other) in arguments.iter_mut().zip(specialization.types(db)) {
+            *argument = IntersectionType::from_two_elements(db, env, *argument, *other);
+        }
+    }
+    Some(arguments)
 }
 
 /// Return the value of `WithAnnotations[Article, TitleLength]` from django-stubs-ext, the model
@@ -454,16 +470,15 @@ fn queryset_rows_return_type<'db>(
     fields: impl IntoIterator<Item = Type<'db>>,
     rows: QuerySetRows,
 ) -> Option<Type<'db>> {
-    let specialization = declared.known_specialization(db, env, KnownClass::DjangoQuerySet)?;
+    let model = *base_type_arguments(db, env, declared, KnownClass::DjangoQuerySet)?.first()?;
     let queryset = KnownClass::DjangoQuerySet.try_to_class_literal(db, env)?;
-    let model = specialization.types(db).first().copied()?;
 
     let columns = fields
         .into_iter()
         .map(|field| {
             let name = field.as_string_literal()?.value(db);
             let ty = if name.contains(LOOKUP_SEP) {
-                let (model, _) = model.nominal_class(db, env)?.static_class_literal(db)?;
+                let (model, _) = model_class(db, env, model)?;
                 resolve_path(db, &QueryContext::of_model(model), name).value_type(db, env)?
             } else {
                 // The member of the model, which can also be an annotation.
@@ -491,7 +506,7 @@ fn queryset_rows_return_type<'db>(
         (QuerySetRows::Flat, _) => return None,
         (QuerySetRows::Named, _) => {
             // Django creates a namedtuple class named `Row` for the names of each query.
-            let (owner, _) = model.nominal_class(db, env)?.static_class_literal(db)?;
+            let (owner, _) = model_class(db, env, model)?;
             let fields = columns
                 .into_iter()
                 .map(|(name, ty)| NamedTupleField {
