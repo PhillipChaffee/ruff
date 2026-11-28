@@ -167,6 +167,15 @@ pub enum KnownClass {
     DjangoField,
     DjangoDateField,
     DjangoForeignKey,
+    DjangoManyToManyField,
+    DjangoOneToOneField,
+    DjangoLazySettings,
+    DjangoBaseManager,
+    DjangoQuerySet,
+    DjangoBaseForm,
+    DrfBaseSerializer,
+    DjangoApps,
+    DjangoAggregate,
     // Pydantic
     PydanticBaseModel,
     PydanticBaseSettings,
@@ -298,6 +307,15 @@ impl KnownClass {
             | Self::DjangoField
             | Self::DjangoDateField
             | Self::DjangoForeignKey
+            | Self::DjangoManyToManyField
+            | Self::DjangoOneToOneField
+            | Self::DjangoLazySettings
+            | Self::DjangoBaseManager
+            | Self::DjangoQuerySet
+            | Self::DjangoBaseForm
+            | Self::DrfBaseSerializer
+            | Self::DjangoApps
+            | Self::DjangoAggregate
             | Self::PydanticBaseModel
             | Self::PydanticBaseSettings
             | Self::PydanticConfigDict
@@ -440,6 +458,15 @@ impl KnownClass {
             | Self::DjangoField
             | Self::DjangoDateField
             | Self::DjangoForeignKey
+            | Self::DjangoManyToManyField
+            | Self::DjangoOneToOneField
+            | Self::DjangoLazySettings
+            | Self::DjangoBaseManager
+            | Self::DjangoQuerySet
+            | Self::DjangoBaseForm
+            | Self::DrfBaseSerializer
+            | Self::DjangoApps
+            | Self::DjangoAggregate
             | Self::PydanticBaseModel
             | Self::PydanticBaseSettings
             | Self::PydanticConfigDict
@@ -572,6 +599,15 @@ impl KnownClass {
             | KnownClass::DjangoField
             | KnownClass::DjangoDateField
             | KnownClass::DjangoForeignKey
+            | KnownClass::DjangoManyToManyField
+            | KnownClass::DjangoOneToOneField
+            | KnownClass::DjangoLazySettings
+            | KnownClass::DjangoBaseManager
+            | KnownClass::DjangoQuerySet
+            | KnownClass::DjangoBaseForm
+            | KnownClass::DrfBaseSerializer
+            | KnownClass::DjangoApps
+            | KnownClass::DjangoAggregate
             | KnownClass::PydanticBaseModel
             | KnownClass::PydanticBaseSettings
             | KnownClass::PydanticConfigDict
@@ -696,6 +732,15 @@ impl KnownClass {
             | KnownClass::DjangoField
             | KnownClass::DjangoDateField
             | KnownClass::DjangoForeignKey
+            | KnownClass::DjangoManyToManyField
+            | KnownClass::DjangoOneToOneField
+            | KnownClass::DjangoLazySettings
+            | KnownClass::DjangoBaseManager
+            | KnownClass::DjangoQuerySet
+            | KnownClass::DjangoBaseForm
+            | KnownClass::DrfBaseSerializer
+            | KnownClass::DjangoApps
+            | KnownClass::DjangoAggregate
             | KnownClass::PydanticBaseModel
             | KnownClass::PydanticBaseSettings
             | KnownClass::PydanticRootModel
@@ -819,6 +864,15 @@ impl KnownClass {
             | KnownClass::DjangoField
             | KnownClass::DjangoDateField
             | KnownClass::DjangoForeignKey
+            | KnownClass::DjangoManyToManyField
+            | KnownClass::DjangoOneToOneField
+            | KnownClass::DjangoLazySettings
+            | KnownClass::DjangoBaseManager
+            | KnownClass::DjangoQuerySet
+            | KnownClass::DjangoBaseForm
+            | KnownClass::DrfBaseSerializer
+            | KnownClass::DjangoApps
+            | KnownClass::DjangoAggregate
             | KnownClass::PydanticBaseModel
             | KnownClass::PydanticBaseSettings
             | KnownClass::PydanticConfigDict
@@ -955,6 +1009,15 @@ impl KnownClass {
             | Self::DjangoField
             | Self::DjangoDateField
             | Self::DjangoForeignKey
+            | Self::DjangoManyToManyField
+            | Self::DjangoOneToOneField
+            | Self::DjangoLazySettings
+            | Self::DjangoBaseManager
+            | Self::DjangoQuerySet
+            | Self::DjangoBaseForm
+            | Self::DrfBaseSerializer
+            | Self::DjangoApps
+            | Self::DjangoAggregate
             | Self::PydanticBaseModel
             | Self::PydanticBaseSettings
             | Self::PydanticConfigDict
@@ -1080,6 +1143,15 @@ impl KnownClass {
             | KnownClass::DjangoField
             | KnownClass::DjangoDateField
             | KnownClass::DjangoForeignKey
+            | KnownClass::DjangoManyToManyField
+            | KnownClass::DjangoOneToOneField
+            | KnownClass::DjangoLazySettings
+            | KnownClass::DjangoBaseManager
+            | KnownClass::DjangoQuerySet
+            | KnownClass::DjangoBaseForm
+            | KnownClass::DrfBaseSerializer
+            | KnownClass::DjangoApps
+            | KnownClass::DjangoAggregate
             | KnownClass::PydanticBaseModel
             | KnownClass::PydanticBaseSettings
             | KnownClass::PydanticConfigDict
@@ -1217,6 +1289,15 @@ impl KnownClass {
             Self::DjangoField => "Field",
             Self::DjangoDateField => "DateField",
             Self::DjangoForeignKey => "ForeignKey",
+            Self::DjangoManyToManyField => "ManyToManyField",
+            Self::DjangoOneToOneField => "OneToOneField",
+            Self::DjangoLazySettings => "LazySettings",
+            Self::DjangoBaseManager => "BaseManager",
+            Self::DjangoQuerySet => "QuerySet",
+            Self::DjangoBaseForm => "BaseForm",
+            Self::DrfBaseSerializer => "BaseSerializer",
+            Self::DjangoApps => "Apps",
+            Self::DjangoAggregate => "Aggregate",
             Self::PydanticBaseModel => "BaseModel",
             Self::PydanticBaseSettings => "BaseSettings",
             Self::PydanticConfigDict => "ConfigDict",
@@ -1658,6 +1739,15 @@ impl KnownClass {
             Self::DjangoModel => KnownModule::DjangoDbModelsBase,
             Self::DjangoField | Self::DjangoDateField => KnownModule::DjangoDbModelsFields,
             Self::DjangoForeignKey => KnownModule::DjangoDbModelsFieldsRelated,
+            Self::DjangoManyToManyField => KnownModule::DjangoDbModelsFieldsRelated,
+            Self::DjangoOneToOneField => KnownModule::DjangoDbModelsFieldsRelated,
+            Self::DjangoLazySettings => KnownModule::DjangoConf,
+            Self::DjangoBaseManager => KnownModule::DjangoDbModelsManager,
+            Self::DjangoQuerySet => KnownModule::DjangoDbModelsQuery,
+            Self::DjangoBaseForm => KnownModule::DjangoFormsForms,
+            Self::DrfBaseSerializer => KnownModule::RestFrameworkSerializers,
+            Self::DjangoApps => KnownModule::DjangoAppsRegistry,
+            Self::DjangoAggregate => KnownModule::DjangoDbModelsAggregates,
             Self::PydanticBaseModel => KnownModule::PydanticMain,
             Self::PydanticBaseSettings | Self::PydanticSettingsConfigDict => {
                 KnownModule::PydanticSettingsMain
@@ -1786,6 +1876,15 @@ impl KnownClass {
             | Self::DjangoField
             | Self::DjangoDateField
             | Self::DjangoForeignKey
+            | Self::DjangoManyToManyField
+            | Self::DjangoOneToOneField
+            | Self::DjangoLazySettings
+            | Self::DjangoBaseManager
+            | Self::DjangoQuerySet
+            | Self::DjangoBaseForm
+            | Self::DrfBaseSerializer
+            | Self::DjangoApps
+            | Self::DjangoAggregate
             | Self::PydanticBaseModel
             | Self::PydanticBaseSettings
             | Self::PydanticConfigDict
@@ -1894,6 +1993,15 @@ impl KnownClass {
             "Field" => &[Self::Field, Self::DjangoField],
             "DateField" => &[Self::DjangoDateField],
             "ForeignKey" => &[Self::DjangoForeignKey],
+            "ManyToManyField" => &[Self::DjangoManyToManyField],
+            "OneToOneField" => &[Self::DjangoOneToOneField],
+            "LazySettings" => &[Self::DjangoLazySettings],
+            "BaseManager" => &[Self::DjangoBaseManager],
+            "QuerySet" => &[Self::DjangoQuerySet],
+            "BaseForm" => &[Self::DjangoBaseForm],
+            "BaseSerializer" => &[Self::DrfBaseSerializer],
+            "Apps" => &[Self::DjangoApps],
+            "Aggregate" => &[Self::DjangoAggregate],
             "KW_ONLY" => &[Self::KwOnly],
             "NamedTupleFallback" => &[Self::NamedTupleFallback],
             "NamedTupleLike" => &[Self::NamedTupleLike],
@@ -2024,6 +2132,15 @@ impl KnownClass {
             | Self::DjangoField
             | Self::DjangoDateField
             | Self::DjangoForeignKey
+            | Self::DjangoManyToManyField
+            | Self::DjangoOneToOneField
+            | Self::DjangoLazySettings
+            | Self::DjangoBaseManager
+            | Self::DjangoQuerySet
+            | Self::DjangoBaseForm
+            | Self::DrfBaseSerializer
+            | Self::DjangoApps
+            | Self::DjangoAggregate
             | Self::PydanticBaseModel
             | Self::PydanticBaseSettings
             | Self::PydanticConfigDict

@@ -708,7 +708,7 @@ impl SearchPath {
     }
 
     /// Is this a user-provided extra search path?
-    pub(crate) fn is_extra(&self) -> bool {
+    pub fn is_extra(&self) -> bool {
         matches!(&*self.0, SearchPathInner::Extra(_))
     }
 

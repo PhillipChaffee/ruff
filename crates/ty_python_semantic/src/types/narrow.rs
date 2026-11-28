@@ -9,6 +9,7 @@ use crate::reachability::{
     type_narrowed_by_previous_patterns,
 };
 use crate::subscript::PyIndex;
+use crate::types::dedicated::django;
 use crate::types::function::KnownFunction;
 use crate::types::infer::{ExpressionInference, infer_same_file_expression_type};
 use crate::types::iteration::extract_literal_container_element_types;
@@ -32,7 +33,7 @@ use ty_python_core::ast_ids::HasScopedUseId;
 use ty_python_core::definition::{Definition, DefinitionKind};
 use ty_python_core::expression::Expression;
 use ty_python_core::frozen::FrozenMap;
-use ty_python_core::place::{PlaceExpr, PlaceTable, ScopedPlaceId};
+use ty_python_core::place::{PlaceExpr, PlaceTable, ScopedPlaceId, id_attribute_companion_place};
 use ty_python_core::predicate::{
     ClassPatternPredicateKind, MappingPatternPredicateKind, PatternPredicate, PatternPredicateKind,
     Predicate, PredicateNode, SequencePatternPredicateKind, SubjectElementPatternPredicate,
@@ -1780,8 +1781,24 @@ impl<'db, 'ast> NarrowingConstraintsBuilder<'db, 'ast> {
                     .map(|(place, constraint)| {
                         NarrowingConstraints::from_iter([(place, constraint)])
                     });
+                // A falsy ID can be `0`, which refers to a row, so only a truthy ID narrows.
+                let foreign_key_constraints = if is_positive {
+                    self.narrow_foreign_key_by_id(
+                        attribute,
+                        inference.expression_type(&*attribute.value),
+                        true,
+                    )
+                    .map(|(place, constraint)| {
+                        NarrowingConstraints::from_iter([(place, constraint)])
+                    })
+                } else {
+                    None
+                };
 
-                Self::merge_optional_constraints_and(constraints, nominal_constraints)
+                Self::merge_optional_constraints_and(
+                    Self::merge_optional_constraints_and(constraints, nominal_constraints),
+                    foreign_key_constraints,
+                )
             }
             ast::Expr::Subscript(subscript) => {
                 let constraints = self.evaluate_simple_expr(expression_node, is_positive);
@@ -4323,6 +4340,17 @@ impl<'db> NarrowingConstraintsBuilder<'db, '_> {
                 ) {
                     insert_narrowing_constraint(&mut constraints, place, constraint);
                 }
+
+                if matches!(operator, ast::CmpOp::Is | ast::CmpOp::IsNot)
+                    && other_type.is_none(db)
+                    && let Some((place, constraint)) = self.narrow_foreign_key_by_id(
+                        attribute,
+                        value_type,
+                        is_positive == (*operator == ast::CmpOp::IsNot),
+                    )
+                {
+                    insert_narrowing_constraint(&mut constraints, place, constraint);
+                }
             };
 
             if let ast::Expr::Attribute(attribute) = left
@@ -5555,6 +5583,39 @@ impl<'db> NarrowingConstraintsBuilder<'db, '_> {
         let attribute_value_place_expr = PlaceExpr::try_from_expr(attribute_value_expr)?;
         let place = self.expect_place(&attribute_value_place_expr);
         Some((place, NarrowingConstraint::replacement(narrowed)))
+    }
+
+    /// Narrow the nullable Django foreign key `book.shelf` when a check narrows its ID attribute
+    /// `book.shelf_id`. `attribute` is the ID attribute and `attribute_value_type` is the type of
+    /// `book`. With `is_set`, the check proves that the ID is set, and the foreign key is not
+    /// `None`; otherwise it proves that the ID is `None`, and so is the foreign key.
+    fn narrow_foreign_key_by_id(
+        &self,
+        attribute: &ast::ExprAttribute,
+        attribute_value_type: Type<'db>,
+        is_set: bool,
+    ) -> Option<(ScopedPlaceId, NarrowingConstraint<'db>)> {
+        let db = self.db;
+        // This first checks the name, so it returns early, without looking at types, for an
+        // attribute that cannot be an ID.
+        if !django::is_nullable_foreign_key_id(
+            db,
+            &self.env,
+            attribute_value_type,
+            attribute.attr.id(),
+        ) {
+            return None;
+        }
+        // The semantic index registers the same place for a predicate on `book.shelf_id`.
+        let foreign_key = id_attribute_companion_place(attribute)?;
+        let place = self.places().place_id(&foreign_key)?;
+        let none = Type::none(db, &self.env);
+        let ty = if is_set {
+            none.negate(db, &self.env)
+        } else {
+            none
+        };
+        Some((place, NarrowingConstraint::intersection(ty)))
     }
 }
 

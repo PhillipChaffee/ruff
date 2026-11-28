@@ -6404,7 +6404,7 @@ impl<'db> Parameter<'db> {
     }
 
     /// Rewrites a positional-or-keyword parameter as keyword-only while preserving its metadata.
-    fn positional_or_keyword_to_keyword_only(&self) -> Self {
+    pub(crate) fn positional_or_keyword_to_keyword_only(&self) -> Self {
         let mut result = self.clone();
         if let ParameterKind::PositionalOrKeyword { name, default_type } = &self.kind {
             result.kind = ParameterKind::KeywordOnly {

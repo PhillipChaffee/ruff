@@ -277,12 +277,38 @@ pub enum KnownModule {
     #[strum(serialize = "struct", serialize = "_struct")]
     Struct,
     // Third-party modules
+    #[strum(serialize = "django.apps.registry")]
+    DjangoAppsRegistry,
+    #[strum(serialize = "django.conf")]
+    DjangoConf,
+    #[strum(serialize = "django.conf.global_settings")]
+    DjangoConfGlobalSettings,
+    #[strum(serialize = "django.contrib.auth.models")]
+    DjangoContribAuthModels,
+    #[strum(serialize = "django.db.models.aggregates")]
+    DjangoDbModelsAggregates,
     #[strum(serialize = "django.db.models.base")]
     DjangoDbModelsBase,
+    #[strum(serialize = "django.db.models.enums")]
+    DjangoDbModelsEnums,
     #[strum(serialize = "django.db.models.fields")]
     DjangoDbModelsFields,
     #[strum(serialize = "django.db.models.fields.related")]
     DjangoDbModelsFieldsRelated,
+    #[strum(serialize = "django.db.models.fields.related_descriptors")]
+    DjangoDbModelsFieldsRelatedDescriptors,
+    #[strum(serialize = "django.db.models.manager")]
+    DjangoDbModelsManager,
+    #[strum(serialize = "django.db.models.query")]
+    DjangoDbModelsQuery,
+    #[strum(serialize = "django.forms.forms")]
+    DjangoFormsForms,
+    #[strum(serialize = "django.utils.choices")]
+    DjangoUtilsChoices,
+    #[strum(serialize = "django_stubs_ext.annotations")]
+    DjangoStubsExtAnnotations,
+    #[strum(serialize = "rest_framework.serializers")]
+    RestFrameworkSerializers,
     #[strum(serialize = "pydantic.config")]
     PydanticConfig,
     #[strum(serialize = "pydantic.fields")]
@@ -342,9 +368,24 @@ impl KnownModule {
             Self::Templatelib => "string.templatelib",
             Self::Numbers => "numbers",
             Self::Struct => "struct",
+            Self::DjangoAppsRegistry => "django.apps.registry",
+            Self::DjangoConf => "django.conf",
+            Self::DjangoConfGlobalSettings => "django.conf.global_settings",
+            Self::DjangoContribAuthModels => "django.contrib.auth.models",
+            Self::DjangoDbModelsAggregates => "django.db.models.aggregates",
             Self::DjangoDbModelsBase => "django.db.models.base",
+            Self::DjangoDbModelsEnums => "django.db.models.enums",
             Self::DjangoDbModelsFields => "django.db.models.fields",
             Self::DjangoDbModelsFieldsRelated => "django.db.models.fields.related",
+            Self::DjangoDbModelsFieldsRelatedDescriptors => {
+                "django.db.models.fields.related_descriptors"
+            }
+            Self::DjangoDbModelsManager => "django.db.models.manager",
+            Self::DjangoDbModelsQuery => "django.db.models.query",
+            Self::DjangoFormsForms => "django.forms.forms",
+            Self::DjangoUtilsChoices => "django.utils.choices",
+            Self::DjangoStubsExtAnnotations => "django_stubs_ext.annotations",
+            Self::RestFrameworkSerializers => "rest_framework.serializers",
             Self::PydanticConfig => "pydantic.config",
             Self::PydanticFields => "pydantic.fields",
             Self::PydanticFunctionalValidators => "pydantic.functional_validators",
@@ -379,9 +420,22 @@ impl KnownModule {
     /// Return `true` if this module is provided by a supported third-party package.
     pub const fn is_third_party(self) -> bool {
         match self {
-            Self::DjangoDbModelsBase
+            Self::DjangoAppsRegistry
+            | Self::DjangoConf
+            | Self::DjangoConfGlobalSettings
+            | Self::DjangoContribAuthModels
+            | Self::DjangoDbModelsAggregates
+            | Self::DjangoDbModelsBase
+            | Self::DjangoDbModelsEnums
             | Self::DjangoDbModelsFields
             | Self::DjangoDbModelsFieldsRelated
+            | Self::DjangoDbModelsFieldsRelatedDescriptors
+            | Self::DjangoDbModelsManager
+            | Self::DjangoDbModelsQuery
+            | Self::DjangoFormsForms
+            | Self::DjangoUtilsChoices
+            | Self::DjangoStubsExtAnnotations
+            | Self::RestFrameworkSerializers
             | Self::PydanticConfig
             | Self::PydanticFields
             | Self::PydanticFunctionalValidators

@@ -185,6 +185,28 @@ def _():
         reveal_type(c.x)  # revealed: int
 ```
 
+### Attributes with an `_id` suffix
+
+A check of `c.foo_id` narrows only `c.foo_id`. ty narrows `c.foo` too only for the ID attribute of a
+nullable Django foreign key (see `external/django.md`), so the attribute `c.foo` of another class
+keeps its type:
+
+```py
+class Foo: ...
+
+class C:
+    foo: Foo | None
+    foo_id: int | None
+
+def _(c: C):
+    if c.foo_id is not None:
+        reveal_type(c.foo_id)  # revealed: int
+        reveal_type(c.foo)  # revealed: Foo | None
+
+    if c.foo_id:  # error: [truthiness-test-of-none-union]
+        reveal_type(c.foo)  # revealed: Foo | None
+```
+
 ## Subscript narrowing
 
 ### Number subscript

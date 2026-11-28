@@ -1725,9 +1725,14 @@ impl<'db> StaticClassLiteral<'db> {
                 ) => Type::FunctionLiteral(
                     function.with_inherited_generic_context(db, generic_context),
                 ),
-                _ => ty,
+                _ => django::refined_class_member(db, env, self, specialization, name, ty)
+                    .unwrap_or(ty),
             }
         });
+
+        if !member.inner.place.is_undefined() && django::is_renamed_field(db, self, name) {
+            return Member::unbound();
+        }
 
         if self.has_own_slot_descriptor(db, name) {
             return Member::definitely_declared(self.own_slot_descriptor(
